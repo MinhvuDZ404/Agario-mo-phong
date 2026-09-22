@@ -322,9 +322,32 @@ function drawAiDebug(ctx: CanvasRenderingContext2D, engine: AgarEngine) {
     ctx.moveTo(mark.x, mark.y);
     ctx.lineTo(mark.tx, mark.ty);
     ctx.stroke();
+    if (mark.targetScore > 0.2) {
+      ctx.globalAlpha = 0.62;
+      ctx.setLineDash([5, 4]);
+      ctx.strokeStyle = '#d38e46';
+      ctx.beginPath();
+      ctx.moveTo(mark.x, mark.y);
+      ctx.lineTo(mark.interceptX, mark.interceptY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 0.5;
+      ctx.fillStyle = '#d38e46';
+      circle(ctx, mark.interceptX, mark.interceptY, 7 + mark.huntProbability * 9);
+      ctx.stroke();
+    }
+    if (mark.threat > 0.3) {
+      ctx.globalAlpha = 0.45;
+      ctx.strokeStyle = '#e85d4c';
+      ctx.beginPath();
+      ctx.moveTo(mark.x, mark.y);
+      ctx.lineTo(mark.escapeX, mark.escapeY);
+      ctx.stroke();
+    }
     ctx.globalAlpha = 0.92;
     ctx.fillStyle = color;
-    ctx.fillText(mark.note, mark.x, mark.y - 14);
+    const tti = Number.isFinite(mark.timeToIntercept) ? ` tti=${mark.timeToIntercept.toFixed(1)}` : '';
+    ctx.fillText(`${mark.note} ${mark.situation} q=${Math.round(mark.confidence * 100)}%${tti}`, mark.x, mark.y - 14);
   }
   ctx.restore();
 }

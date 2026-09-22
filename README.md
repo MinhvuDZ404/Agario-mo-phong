@@ -60,8 +60,10 @@ npm run check    # typecheck toàn project (tsc --noEmit)
 
 - `src/App.tsx`: lobby, HUD, settings, skins, results, input, achievements, debug overlay, and browser persistence.
 - `src/agar/config.ts`: **single source of balance** — every gameplay number (mass, speed, split, merge, eject, virus, decay, AI, camera) lives here.
-- `src/agar/ai.ts`: bot mind. Perception is local, then threat, farm, hunt, flee, split, and virus choices are scored with hysteresis. Nine personalities change priorities, not speed or vision cheats. Physics still owns movement.
-- `src/agar/engine.ts`: fixed-substep simulation, deterministic eating resolution, splitting, merging, viruses, scoring, spawn scoring, and invariant validation. Bots only receive an aim point plus an optional split or eject.
+- `src/agar/ai.ts`: bot mind. Perception is local, then a situation layer classifies danger, opportunity, crowding and mobility before utility scoring and strategy hysteresis. V2 adds bounded trajectory prediction, time-to-intercept, intercept/pressure/disengage planning, multi-threat escape corridors, target commitment and no-win chase abandonment. Nine personalities change priorities, not speed or vision cheats. Short-lived danger, farm, failed-target and escape memories tune risk without becoming fake machine learning. Physics still owns movement.
+- `src/agar/engine.ts`: fixed-substep simulation, deterministic eating resolution, splitting, merging, viruses, scoring, spawn scoring, invariant validation, AI outcome/death-reason telemetry, and non-deterministic wall-clock diagnostics. Bots only receive an aim point plus an optional split or eject; their planning never changes physics.
+- `src/agar/config.ts`: V2 planning, context, memory, tactical-sample and commitment budgets live beside the existing balance values. Far bots use lower tactical detail; nearby combat gets the full bounded evaluator.
+- `src/agar/renderer.ts`: procedural canvas art, skins, eat pulses, floating score text, pellet shimmer, camera, arena, minimap, and opt-in AI V2 debug vectors for predicted intercepts, escape corridors, situation and confidence.
 - `src/agar/renderer.ts`: procedural canvas art, skins, eat pulses, floating score text, pellet shimmer, camera, arena, and minimap.
 - `src/agar/sound.ts`: gesture-activated Web Audio effects (12 presets, master volume, throttling, node cleanup).
 - `src/agar/storage.ts`: versioned, validated localStorage saves with legacy migration, nickname sanitizer, and achievement definitions.
@@ -75,11 +77,20 @@ Nickname, appearance, settings, volume, achievements, and best stats are stored 
 - `update(dt)` clamps wild deltas (background tabs) and runs the sim in fixed 1/60 sub-steps, so eating and collision behave the same at 30–144 FPS.
 - Split/merge/eat conserve mass exactly (decay above 180 mass is the only designed sink).
 - `engine.validateInvariants()` reports structural violations (NaN, negative mass, duplicate ids, dead cells in play, out-of-bounds entities, over-cap pools) and backs both the test suite and the debug overlay.
-- Open the game with `?debug=1` to show FPS, entity counts, camera zoom, invariant violations, and nearby bot strategy vectors.
+- Open the game with `?debug=1` to show FPS, entity counts, camera zoom, invariant violations, AI decision/step timing, and nearby bot strategy vectors. The vectors include perception, predicted intercept, escape corridor, situation, confidence, hunt probability and time-to-intercept.
+- `AgarEngine.aiReport()` exposes bounded ecosystem telemetry: strategy share/switches, oscillations, decision quality, hunt/escape outcomes, death reasons (`PREDATOR_CONTACT`, `BAD_SPLIT`, `BOUNDARY_TRAP`, `VIRUS_POP`, `CHASE_OVERCOMMIT`, `CROWD_COLLISION`) and win reasons. Wall-clock timings are diagnostics only and never affect the seeded simulation.
+
+## AI V2 behavior
+
+The decision stack is `perceive → classify → predict → evaluate → plan → commit → steer → record outcome`. Perception remains local and uses the existing food index; no bot scans hidden map state. A tactical decision evaluates a small number of future samples, comparing direct chase, intercept, pressure, disengage, farm and reposition routes. Emergency survival overrides commitment. Target commitment prevents harmless target oscillation, while a low catch probability, stalled progress or a new threat abandons a no-win chase.
+
+Escape scoring projects every visible predator, not just the nearest one, and penalizes boundary traps, viruses, crowding and low future mobility. Large bots protect gained mass and split only after checking the landing lane; post-split vulnerability is explicitly represented. Virus decisions can avoid a pop, use a virus as a shield/bait location, or feed one when the local alignment and risk justify it. All behavior uses the same movement, mass, collision and cooldown rules as the player.
 
 ## Verification
 
 - `npm run check` — strict TypeScript, zero errors.
-- `npm run test` — including 5-minute long-run stability, 100 consecutive restarts, eject/split/virus spam, extreme-mass clamping, determinism (same seed → same leaderboard), scripted 90-second play sessions in every mode, and a 60-second bot ecosystem probe.
+- `npm run test` — including 5-minute long-run stability, 100 consecutive restarts, eject/split/virus spam, extreme-mass clamping, determinism (same seed → same leaderboard), scripted 90-second play sessions in every mode, a 60-second bot ecosystem probe, predictive/multi-threat/no-win AI unit tests, and seven-seed V2 robustness coverage.
+- Vitest uses a finite 15-second test budget in `vitest.config.ts`: the default 5-second unit-test timeout was too small for the intentionally scripted multi-mode fixed-step session, while a hung simulation still fails promptly.
 - `npm run build` — single-file production bundle served from `dist/`.
+- For a runtime profile, use `?debug=1` and watch `ai=...ms`, `step=...ms`, and `aiMax=...ms`; these counters are wall-clock diagnostics and do not affect determinism.
 - Browser input, touch behavior, and long-running gameplay still benefit from manual testing on the target devices.
