@@ -27,6 +27,52 @@ export type AiStrategy =
   | 'recover'
   | 'reposition';
 
+/** Local situation labels used by the V2 decision layer. */
+export type AiSituation =
+  | 'SAFE_FARM'
+  | 'DANGEROUS_FARM'
+  | 'PREDATOR_NEAR'
+  | 'PREY_NEAR'
+  | 'MULTI_THREAT'
+  | 'CHASE_OPPORTUNITY'
+  | 'SPLIT_OPPORTUNITY'
+  | 'VIRUS_OPPORTUNITY'
+  | 'TRAPPED'
+  | 'ESCAPE_WINDOW'
+  | 'POST_SPLIT_VULNERABILITY'
+  | 'CROWDED'
+  | 'RECOVERY';
+
+export type AiDeathReason =
+  | 'PREDATOR_CONTACT'
+  | 'BAD_SPLIT'
+  | 'BOUNDARY_TRAP'
+  | 'VIRUS_POP'
+  | 'CHASE_OVERCOMMIT'
+  | 'CROWD_COLLISION'
+  | 'UNKNOWN';
+
+export type AiWinReason =
+  | 'SAFE_FARM'
+  | 'FREE_KILL'
+  | 'SUCCESSFUL_SPLIT'
+  | 'VIRUS_BAIT'
+  | 'INTERCEPT'
+  | 'OPPORTUNISTIC_EAT';
+
+export interface AiMemoryPoint {
+  x: number;
+  y: number;
+  at: number;
+  value: number;
+}
+
+export interface AiTargetMemory {
+  ownerId: number;
+  at: number;
+  value: number;
+}
+
 export interface Preferences {
   dark: boolean;
   names: boolean;

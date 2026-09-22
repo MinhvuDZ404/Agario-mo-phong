@@ -174,7 +174,42 @@ export const AI = {
     maxFood: 120,
     foodRadius: 560,
     headings: 12,
+    /** Tactical samples are deliberately bounded: decisions stay local and cheap. */
+    tacticalHeadings: 8,
+    tacticalHorizon: 1.35,
+    tacticalSamples: 4,
+    maxMemoryEvents: 8,
   },
+  planning: {
+    /** Seconds used by the lightweight trajectory predictor. */
+    predictionHorizon: 1.8,
+    interceptIterations: 4,
+    noWinProbability: 0.18,
+    noWinGrace: 1.2,
+    pressureDistance: 520,
+    /** A challenger must beat a committed target by this amount. */
+    commitmentBonus: 0.16,
+    commitmentDecay: 0.08,
+    /** How strongly a newly remembered outcome changes risk, never physics. */
+    outcomeRiskStep: 0.07,
+  },
+  context: {
+    safeDanger: 0.34,
+    emergencyDanger: 1.05,
+    crowdRadius: 320,
+    crowdDanger: 8,
+    lowMobility: 0.36,
+    goodEscape: 0.62,
+    goodOpportunity: 1.15,
+    regionMemorySeconds: 5.5,
+  },
+  confidence: {
+    switchMargin: 0.22,
+    emergencyOverride: 1.65,
+    recoverSeconds: 2.4,
+    targetKeepSeconds: 1.1,
+  },
+
   threat: {
     /** Score at which a reacted threat is treated as immediately dangerous. */
     lethalScore: 1.05,
@@ -227,12 +262,13 @@ export const AI = {
     stuckTarget: 78,
   },
   hysteresis: {
-    margin: 0.2,
-    absolute: 0.28,
+    margin: 0.26,
+    absolute: 0.32,
     override: 1.7,
-    lockSwitches: 6,
-    lockWindow: 2.5,
-    lockDuration: 1.3,
+    /** Contextual commitment: require a sustained pattern before locking. */
+    lockSwitches: 8,
+    lockWindow: 2.8,
+    lockDuration: 1.55,
   },
   memory: {
     avoidSeconds: 3.6,

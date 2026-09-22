@@ -1,5 +1,5 @@
 import {
-  buildReport, createBrain, createTotals, onRespawn, recordDeath, recordVirusPop, think,
+  buildReport, createBrain, createTotals, onRespawn, recordDeath, recordOutcome, recordVirusPop, think,
   type AiMark, type AiReport, type AiTotals, type BotBrain,
 } from './ai';
 import { AI, BALANCE, cellSpeed, massRadius, mergeDelay, zoomForMass } from './config';
@@ -73,6 +73,12 @@ export class AgarEngine {
   private brains = new Map<number, BotBrain>();
   private ownerMap = new Map<number, Organism>();
   private aiTotals: AiTotals = createTotals();
+  /** Wall-clock diagnostics only; never feeds back into deterministic gameplay. */
+  private aiTimeMs = 0;
+  private aiDecisions = 0;
+  private aiSlowestMs = 0;
+  private stepTimeMs = 0;
+  private stepCount = 0;
   private static readonly NO_MARKS: AiMark[] = [];
 
   constructor(seed = 42791) {
@@ -195,6 +201,11 @@ export class AgarEngine {
     this.lastRank = 0;
     this.brains.clear();
     this.aiTotals = createTotals();
+    this.aiTimeMs = 0;
+    this.aiDecisions = 0;
+    this.aiSlowestMs = 0;
+    this.stepTimeMs = 0;
+    this.stepCount = 0;
     this.seedBrains();
     this.zoomOffset = 1;
     this.player.name = name.trim().slice(0, 18) || 'Vô danh';
@@ -224,6 +235,11 @@ export class AgarEngine {
     this.keys.clear();
     this.brains.clear();
     this.aiTotals = createTotals();
+    this.aiTimeMs = 0;
+    this.aiDecisions = 0;
+    this.aiSlowestMs = 0;
+    this.stepTimeMs = 0;
+    this.stepCount = 0;
     this.seedBrains();
     this.zoomOffset = 1;
     this.phase = 'spectating';
@@ -281,6 +297,7 @@ export class AgarEngine {
   }
 
   private step(dt: number) {
+    const started = performance.now();
     this.time += dt;
     if (this.phase === 'playing') this.stats.seconds += dt;
     const cells = this.owners.flatMap(owner => owner.cells).filter(cell => cell.alive);
@@ -310,6 +327,8 @@ export class AgarEngine {
         arenaSound.play('end');
       }
     }
+    this.stepTimeMs += performance.now() - started;
+    this.stepCount++;
   }
 
   /** Spawn scoring: prefer low-density areas far from giants and viruses. */
@@ -383,6 +402,7 @@ export class AgarEngine {
    * physics applies them. Perception stays local — no full-map entity list.
    */
   private decide(owner: Organism, cells: Cell[]) {
+    const decisionStarted = performance.now();
     const brain = this.brainFor(owner);
     const focusX = this.phase === 'spectating' ? this.camera.x : (this.player.cells[0]?.x ?? this.camera.x);
     const focusY = this.phase === 'spectating' ? this.camera.y : (this.player.cells[0]?.y ?? this.camera.y);
@@ -442,14 +462,33 @@ export class AgarEngine {
     brain.lastThreat = decision.threat;
     brain.lastWall = decision.wall;
     brain.note = decision.note;
+    brain.lastAction = decision.strategy;
+    brain.lastActionAt = this.time;
+    brain.situation = decision.situation;
+    brain.strategyConfidence = decision.confidence;
+    brain.timeToIntercept = decision.timeToIntercept;
+    brain.huntProbability = decision.huntProbability;
+    brain.escapeQuality = decision.escapeQuality;
+    brain.crowdingLevel = decision.crowding;
+    brain.opportunityLevel = decision.opportunity;
     owner.nextDecision = this.time + decision.interval;
-    if (decision.split && this.splitOwner(owner, decision.angle, true)) {
-      brain.lastSplitAt = this.time;
-      brain.lastSplitRisky = decision.splitRisky;
-      brain.vulnerableUntil = this.time + 1.7;
-      brain.finishUntil = this.time + 0.9;
-      this.aiTotals.splits++;
+    if (decision.split) {
+      const didSplit = this.splitOwner(owner, decision.angle, true);
+      if (didSplit) {
+        brain.lastAction = 'split';
+        brain.lastActionAt = this.time;
+        brain.lastSplitAt = this.time;
+        brain.lastSplitRisky = decision.splitRisky;
+        brain.vulnerableUntil = this.time + 1.7;
+        brain.finishUntil = this.time + 0.9;
+        this.aiTotals.splits++;
+        recordOutcome(brain, this.aiTotals, 'split_success', this.time, brain.targetOwnerId);
+      } else {
+        recordOutcome(brain, this.aiTotals, 'split_failure', this.time, brain.targetOwnerId);
+      }
     } else if (decision.eject && this.time >= brain.ejectAt && this.ejectOwner(owner, decision.ejectAngle, false)) {
+      brain.lastAction = 'eject';
+      brain.lastActionAt = this.time;
       brain.ejectAt = this.time + BALANCE.ejectCooldown;
       this.aiTotals.ejects++;
       if (decision.ejectKind === 'feed') this.aiTotals.virusFeeds++;
@@ -457,13 +496,20 @@ export class AgarEngine {
     const surviving = decision.strategy === 'flee' || decision.strategy === 'bait';
     const wasSurviving = previous === 'flee' || previous === 'bait';
     if (surviving && !wasSurviving && decision.urgent) this.aiTotals.escapeAttempts++;
-    if (wasSurviving && !surviving && decision.threat < 0.55) this.aiTotals.escapes++;
+    if (wasSurviving && !surviving && decision.threat < 0.55) recordOutcome(brain, this.aiTotals, 'escape_success', this.time);
     const hunting = decision.strategy === 'hunt' || decision.strategy === 'stalk';
     const wasHunting = previous === 'hunt' || previous === 'stalk';
     if (hunting && !wasHunting) this.aiTotals.hunts++;
-    if (decision.abandoned) this.aiTotals.huntsFailed++;
+    if (decision.abandoned) recordOutcome(brain, this.aiTotals, 'hunt_failure', this.time, brain.abandonOwner);
     if (decision.baited && previous !== 'bait') this.aiTotals.virusBaits++;
     if (decision.oscillated) this.aiTotals.oscillations++;
+    const elapsed = performance.now() - decisionStarted;
+    this.aiTimeMs += elapsed;
+    this.aiDecisions++;
+    this.aiSlowestMs = Math.max(this.aiSlowestMs, elapsed);
+    this.aiTotals.decisions++;
+    this.aiTotals.decisionQualitySum += decision.confidence * (decision.urgent ? 0.92 : 1);
+    this.aiTotals.decisionQualitySamples++;
   }
 
   /** Ease the aim point so bots don't snap 180° every think. Players stay direct. */
@@ -539,7 +585,13 @@ export class AgarEngine {
       if (Math.hypot(x - this.camera.x, y - this.camera.y) > 980) continue;
       marks.push({
         x, y, tx: brain.desiredX, ty: brain.desiredY,
-        strategy: brain.strategy, perception: brain.perception, note: brain.note,
+        interceptX: brain.interceptX, interceptY: brain.interceptY,
+        escapeX: brain.targetEscapeX, escapeY: brain.targetEscapeY,
+        strategy: brain.strategy, situation: brain.situation,
+        perception: brain.perception, confidence: brain.strategyConfidence,
+        targetScore: brain.targetScore, threat: brain.threatScore,
+        huntProbability: brain.huntProbability, timeToIntercept: brain.timeToIntercept,
+        escapeQuality: brain.escapeQuality, note: brain.note,
       });
       if (marks.length >= 12) break;
     }
@@ -706,7 +758,10 @@ export class AgarEngine {
           } else {
             this.aiTotals.foodEaten++;
             const brain = this.brains.get(owner.id);
-            if (brain) brain.foodEaten++;
+            if (brain) {
+              brain.foodEaten++;
+              if (this.time - brain.lastOutcomeAt > 0.6) recordOutcome(brain, this.aiTotals, 'safe_farm', this.time);
+            }
           }
           this.resetFood(food);
         }
@@ -754,9 +809,10 @@ export class AgarEngine {
           this.aiTotals.preyEaten++;
           const brain = this.brains.get(big.owner);
           if (brain && brain.targetCellId === small.id) {
-            this.aiTotals.huntsWon++;
-            brain.kills++;
+            recordOutcome(brain, this.aiTotals, 'hunt_success', this.time, small.owner);
             brain.targetCellId = 0;
+          } else if (brain) {
+            recordOutcome(brain, this.aiTotals, 'opportunistic_eat', this.time, small.owner);
           }
         }
         this.burst(small.x, small.y, smallOwner.color, 7);
@@ -824,7 +880,7 @@ export class AgarEngine {
   }
 
   private explode(owner: Organism, cell: Cell, bonus: number) {
-    if (owner.id !== 0) recordVirusPop(this.brains.get(owner.id), this.aiTotals);
+    if (owner.id !== 0) recordVirusPop(this.brains.get(owner.id), this.aiTotals, this.time);
     cell.mass += bonus;
     const capacity = BALANCE.maxFragments + 1 - owner.cells.length;
     if (capacity < 2) {
@@ -958,6 +1014,11 @@ export class AgarEngine {
       particles: this.particles.length,
       floaters: this.floaters.length,
       zoom: this.camera.zoom,
+      aiTimeMs: this.aiTimeMs,
+      aiDecisions: this.aiDecisions,
+      aiAverageMs: this.aiDecisions ? this.aiTimeMs / this.aiDecisions : 0,
+      aiSlowestMs: this.aiSlowestMs,
+      stepAverageMs: this.stepCount ? this.stepTimeMs / this.stepCount : 0,
     };
   }
 

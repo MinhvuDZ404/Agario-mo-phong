@@ -8,13 +8,20 @@
  */
 import { AI, AI_PERSONALITY, BALANCE, cellSpeed, impulseTravel, massRadius, type Personality } from './config';
 import type {
-  AiArchetype, AiStrategy, Cell, EjectedMass, Food, GameMode, Organism, Virus,
+  AiArchetype, AiDeathReason, AiMemoryPoint, AiSituation, AiStrategy, AiTargetMemory, AiWinReason,
+  Cell, EjectedMass, Food, GameMode, Organism, Virus,
 } from './types';
 
 const TAU = Math.PI * 2;
 const STEP_RATE = 1 / BALANCE.fixedStep;
 
 const STRATEGIES: AiStrategy[] = ['flee', 'bait', 'hunt', 'stalk', 'farm', 'explore', 'recover', 'reposition'];
+const DEATH_REASONS: AiDeathReason[] = ['PREDATOR_CONTACT', 'BAD_SPLIT', 'BOUNDARY_TRAP', 'VIRUS_POP', 'CHASE_OVERCOMMIT', 'CROWD_COLLISION', 'UNKNOWN'];
+const WIN_REASONS: AiWinReason[] = ['SAFE_FARM', 'FREE_KILL', 'SUCCESSFUL_SPLIT', 'VIRUS_BAIT', 'INTERCEPT', 'OPPORTUNISTIC_EAT'];
+
+function emptyReasons<T extends string>(keys: readonly T[]): Record<T, number> {
+  return Object.fromEntries(keys.map(key => [key, 0])) as Record<T, number>;
+}
 
 const MIN_DURATION: Record<AiStrategy, number> = {
   flee: AI.flee.minDuration,
@@ -96,6 +103,36 @@ export interface BotBrain {
   avoidX: number;
   avoidY: number;
   avoidUntil: number;
+  /** V2 world model: context is local, short-lived, and always explainable. */
+  situation: AiSituation;
+  dangerLevel: number;
+  opportunityLevel: number;
+  crowdingLevel: number;
+  mobilityLevel: number;
+  growthPotential: number;
+  escapeQuality: number;
+  strategyConfidence: number;
+  targetScore: number;
+  targetCommitment: number;
+  targetSeenAt: number;
+  interceptX: number;
+  interceptY: number;
+  targetEscapeX: number;
+  targetEscapeY: number;
+  timeToIntercept: number;
+  huntProbability: number;
+  pressureScore: number;
+  lastFreeKill: boolean;
+  lastAction: AiStrategy | 'split' | 'eject' | 'none';
+  lastActionAt: number;
+  lastOutcomeAt: number;
+  recentDangerZones: AiMemoryPoint[];
+  recentFailedTargets: AiTargetMemory[];
+  recentSuccessfulTargets: AiTargetMemory[];
+  recentEscapeDirections: AiMemoryPoint[];
+  recentFarmRegions: AiMemoryPoint[];
+  lastDeathReason: AiDeathReason | null;
+  lastWinReason: AiWinReason | null;
 }
 
 export interface AiTotals {
@@ -116,6 +153,11 @@ export interface AiTotals {
   virusPops: number;
   switches: number;
   oscillations: number;
+  decisions: number;
+  decisionQualitySum: number;
+  decisionQualitySamples: number;
+  deathReasons: Record<AiDeathReason, number>;
+  winReasons: Record<AiWinReason, number>;
   lifetimes: number[];
   massSamples: number;
   massSum: number;
@@ -145,6 +187,10 @@ export interface AiReport {
   virusPops: number;
   switches: number;
   oscillations: number;
+  decisions: number;
+  decisionQuality: number;
+  deathReasons: Record<AiDeathReason, number>;
+  winReasons: Record<AiWinReason, number>;
   averageMass: number;
   currentAverageMass: number;
   maxMass: number;
@@ -160,8 +206,19 @@ export interface AiMark {
   y: number;
   tx: number;
   ty: number;
+  interceptX: number;
+  interceptY: number;
+  escapeX: number;
+  escapeY: number;
   strategy: AiStrategy;
+  situation: AiSituation;
   perception: number;
+  confidence: number;
+  targetScore: number;
+  threat: number;
+  huntProbability: number;
+  timeToIntercept: number;
+  escapeQuality: number;
   note: string;
 }
 
@@ -180,6 +237,8 @@ export interface ThreatInfo {
   canEat: boolean;
   splitKill: boolean;
   gap: number;
+  timeToIntercept: number;
+  approach: number;
 }
 
 export interface PreyChoice {
@@ -197,6 +256,15 @@ export interface PreyChoice {
   aimY: number;
   freeKill: boolean;
   canSplit: boolean;
+  successProbability: number;
+  timeToIntercept: number;
+  escapeQuality: number;
+  pressureScore: number;
+  competitorRisk: number;
+  interceptX: number;
+  interceptY: number;
+  targetEscapeX: number;
+  targetEscapeY: number;
 }
 
 export interface Decision {
@@ -222,6 +290,14 @@ export interface Decision {
   baited: boolean;
   oscillated: boolean;
   threatId: number;
+  situation: AiSituation;
+  confidence: number;
+  targetId: number;
+  timeToIntercept: number;
+  huntProbability: number;
+  escapeQuality: number;
+  crowding: number;
+  opportunity: number;
 }
 
 export interface ThinkInput {
@@ -340,6 +416,35 @@ export function createBrain(ownerId: number, x: number, y: number, time: number,
     avoidX: x,
     avoidY: y,
     avoidUntil: 0,
+    situation: 'SAFE_FARM',
+    dangerLevel: 0,
+    opportunityLevel: 0,
+    crowdingLevel: 0,
+    mobilityLevel: 1,
+    growthPotential: 0,
+    escapeQuality: 1,
+    strategyConfidence: 0.55,
+    targetScore: 0,
+    targetCommitment: 0,
+    targetSeenAt: time,
+    interceptX: x,
+    interceptY: y,
+    targetEscapeX: x,
+    targetEscapeY: y,
+    timeToIntercept: Infinity,
+    huntProbability: 0,
+    pressureScore: 0,
+    lastFreeKill: false,
+    lastAction: 'none',
+    lastActionAt: time,
+    lastOutcomeAt: time,
+    recentDangerZones: [],
+    recentFailedTargets: [],
+    recentSuccessfulTargets: [],
+    recentEscapeDirections: [],
+    recentFarmRegions: [],
+    lastDeathReason: null,
+    lastWinReason: null,
   };
 }
 
@@ -362,6 +467,11 @@ export function createTotals(): AiTotals {
     virusPops: 0,
     switches: 0,
     oscillations: 0,
+    decisions: 0,
+    decisionQualitySum: 0,
+    decisionQualitySamples: 0,
+    deathReasons: emptyReasons(DEATH_REASONS),
+    winReasons: emptyReasons(WIN_REASONS),
     lifetimes: [],
     massSamples: 0,
     massSum: 0,
@@ -401,12 +511,149 @@ export function onRespawn(brain: BotBrain, x: number, y: number, time: number): 
   brain.lastProgressAt = time;
   brain.bestChaseDist = Infinity;
   brain.massAtStrategy = 0;
+  brain.situation = 'SAFE_FARM';
+  brain.dangerLevel = 0;
+  brain.opportunityLevel = 0;
+  brain.crowdingLevel = 0;
+  brain.mobilityLevel = 1;
+  brain.growthPotential = 0;
+  brain.escapeQuality = 1;
+  brain.strategyConfidence = 0.55;
+  brain.targetScore = 0;
+  brain.targetCommitment = 0;
+  brain.targetSeenAt = time;
+  brain.interceptX = x;
+  brain.interceptY = y;
+  brain.targetEscapeX = x;
+  brain.targetEscapeY = y;
+  brain.timeToIntercept = Infinity;
+  brain.huntProbability = 0;
+  brain.pressureScore = 0;
+  brain.lastFreeKill = false;
+  brain.lastAction = 'none';
+  brain.lastActionAt = time;
+  brain.lastOutcomeAt = time;
+  brain.recentDangerZones.length = 0;
+  brain.recentFailedTargets.length = 0;
+  brain.recentSuccessfulTargets.length = 0;
+  brain.recentEscapeDirections.length = 0;
+  brain.recentFarmRegions.length = 0;
+  brain.lastDeathReason = null;
+  brain.lastWinReason = null;
   brain.note = 'spawn';
+}
+
+function pruneMemory(brain: BotBrain, time: number): void {
+  const cutoff = time - AI.context.regionMemorySeconds;
+  const trim = <T extends { at: number }>(items: T[]) => {
+    while (items.length && items[0].at < cutoff) items.shift();
+    if (items.length > AI.performance.maxMemoryEvents) items.splice(0, items.length - AI.performance.maxMemoryEvents);
+  };
+  trim(brain.recentDangerZones);
+  trim(brain.recentSuccessfulTargets);
+  trim(brain.recentFailedTargets);
+  trim(brain.recentEscapeDirections);
+  trim(brain.recentFarmRegions);
+}
+
+function rememberPoint(items: AiMemoryPoint[], x: number, y: number, value: number, time: number): void {
+  items.push({ x, y, value, at: time });
+  if (items.length > AI.performance.maxMemoryEvents) items.shift();
+}
+
+export function rememberDanger(brain: BotBrain, x: number, y: number, score: number, time: number): void {
+  pruneMemory(brain, time);
+  rememberPoint(brain.recentDangerZones, x, y, score, time);
+}
+
+export function rememberFarmRegion(brain: BotBrain, x: number, y: number, score: number, time: number): void {
+  pruneMemory(brain, time);
+  rememberPoint(brain.recentFarmRegions, x, y, score, time);
+}
+
+export type BotOutcome = 'escape_success' | 'escape_failure' | 'hunt_success' | 'hunt_failure'
+  | 'split_success' | 'split_failure' | 'virus_success' | 'virus_failure' | 'safe_farm' | 'opportunistic_eat';
+
+export function classifyDeathReason(brain: BotBrain, time: number): AiDeathReason {
+  if (time - brain.lastSplitAt < 1.25 && brain.lastSplitRisky) return 'BAD_SPLIT';
+  if (brain.lastWall > 0.78 && brain.mobilityLevel < 0.45) return 'BOUNDARY_TRAP';
+  if (brain.lastWinReason === 'VIRUS_BAIT' || brain.situation === 'VIRUS_OPPORTUNITY') return 'VIRUS_POP';
+  if ((brain.strategy === 'hunt' || brain.strategy === 'stalk')
+    && time - brain.chaseSince > AI.planning.noWinGrace) return 'CHASE_OVERCOMMIT';
+  if (brain.crowdingLevel >= AI.context.crowdDanger) return 'CROWD_COLLISION';
+  if (brain.lastThreat > 0.8) return 'PREDATOR_CONTACT';
+  return 'UNKNOWN';
+}
+
+export function recordOutcome(
+  brain: BotBrain | undefined,
+  totals: AiTotals,
+  outcome: BotOutcome,
+  time: number,
+  ownerId = 0,
+): void {
+  if (!brain) return;
+  brain.lastOutcomeAt = time;
+  pruneMemory(brain, time);
+  let quality = 0.35;
+  if (outcome === 'escape_success') {
+    totals.escapes++;
+    quality = 1;
+    rememberPoint(brain.recentEscapeDirections, brain.desiredX, brain.desiredY, brain.escapeQuality, time);
+  } else if (outcome === 'escape_failure') {
+    brain.risk = Math.max(0.35, brain.risk - AI.planning.outcomeRiskStep);
+    quality = -0.6;
+  } else if (outcome === 'hunt_success') {
+    totals.huntsWon++;
+    brain.kills++;
+    brain.targetCommitment = Math.min(1, brain.targetCommitment + 0.1);
+    brain.lastWinReason = brain.lastFreeKill
+      ? 'FREE_KILL'
+      : brain.pressureScore > 0.5 ? 'INTERCEPT' : 'OPPORTUNISTIC_EAT';
+    totals.winReasons[brain.lastWinReason]++;
+    brain.recentSuccessfulTargets.push({ ownerId, at: time, value: brain.targetScore });
+    quality = 1.1;
+  } else if (outcome === 'hunt_failure') {
+    totals.huntsFailed++;
+    brain.lessons.chase = Math.max(0.55, brain.lessons.chase * 0.9);
+    brain.risk = Math.max(0.38, brain.risk - AI.planning.outcomeRiskStep);
+    brain.recentFailedTargets.push({ ownerId, at: time, value: brain.targetScore });
+    quality = -0.55;
+  } else if (outcome === 'split_success') {
+    brain.lastWinReason = 'SUCCESSFUL_SPLIT';
+    totals.winReasons.SUCCESSFUL_SPLIT++;
+    quality = 1.15;
+  } else if (outcome === 'split_failure') {
+    brain.lessons.split = Math.min(1.5, brain.lessons.split + 0.18);
+    brain.risk = Math.max(0.35, brain.risk - AI.planning.outcomeRiskStep);
+    quality = -0.65;
+  } else if (outcome === 'virus_success') {
+    brain.lastWinReason = 'VIRUS_BAIT';
+    totals.winReasons.VIRUS_BAIT++;
+    quality = 0.8;
+  } else if (outcome === 'virus_failure') {
+    brain.lessons.virus = Math.min(1.6, brain.lessons.virus + 0.25);
+    quality = -0.75;
+  } else if (outcome === 'safe_farm') {
+    brain.risk = clamp(brain.risk + AI.planning.outcomeRiskStep * 0.2, 0.35, 1.6);
+    brain.lastWinReason = 'SAFE_FARM';
+    totals.winReasons.SAFE_FARM++;
+    quality = 0.42;
+  } else if (outcome === 'opportunistic_eat') {
+    brain.lastWinReason = 'OPPORTUNISTIC_EAT';
+    totals.winReasons.OPPORTUNISTIC_EAT++;
+    quality = 0.76;
+  }
+  totals.decisionQualitySum += quality;
+  totals.decisionQualitySamples++;
 }
 
 export function recordDeath(brain: BotBrain | undefined, totals: AiTotals, time: number): void {
   if (!brain) return;
   totals.deaths++;
+  const reason = classifyDeathReason(brain, time);
+  brain.lastDeathReason = reason;
+  totals.deathReasons[reason]++;
   totals.lifetimes.push(Math.max(0, time - brain.bornAt));
   if (totals.lifetimes.length > 240) totals.lifetimes.shift();
   const ignoredThreat = brain.lastThreat > 1.15
@@ -427,10 +674,11 @@ export function recordDeath(brain: BotBrain | undefined, totals: AiTotals, time:
   }
 }
 
-export function recordVirusPop(brain: BotBrain | undefined, totals: AiTotals): void {
+export function recordVirusPop(brain: BotBrain | undefined, totals: AiTotals, time = 0): void {
   if (!brain) return;
   totals.virusPops++;
   brain.lessons.virus = Math.min(1.6, brain.lessons.virus + 0.25);
+  recordOutcome(brain, totals, 'virus_failure', time);
 }
 
 export function buildReport(
@@ -475,6 +723,12 @@ export function buildReport(
     virusPops: totals.virusPops,
     switches: totals.switches,
     oscillations: totals.oscillations,
+    decisions: totals.decisions,
+    decisionQuality: totals.decisionQualitySamples
+      ? totals.decisionQualitySum / totals.decisionQualitySamples
+      : 0,
+    deathReasons: { ...totals.deathReasons },
+    winReasons: { ...totals.winReasons },
     averageMass: totals.massSamples ? totals.massSum / totals.massSamples : massNow / Math.max(1, alive),
     currentAverageMass: alive ? massNow / alive : 0,
     maxMass: totals.maxMass,
@@ -501,6 +755,7 @@ export interface ThreatAssessment {
   splitKill: boolean;
   dist: number;
   gap: number;
+  timeToIntercept: number;
 }
 
 /** How dangerous one cell is. Distance, closing speed and split reach all count. */
@@ -549,7 +804,247 @@ export function assessThreat(args: {
   if (dist > args.perception * 0.82 && closing < 20) score *= 0.45;
   const gap = dist - args.selfRadius - args.otherRadius;
   if (score < AI.threat.ignoreScore && gap > AI.threat.ignoreGap) return null;
-  return { score, closing, canEat, splitKill, dist, gap };
+  const timeToIntercept = closing > 4 ? Math.max(0, gap / closing) : Infinity;
+  return { score, closing, canEat, splitKill, dist, gap, timeToIntercept };
+}
+
+export interface HuntEvaluation {
+  successProbability: number;
+  timeToIntercept: number;
+  interceptX: number;
+  interceptY: number;
+  targetEscapeX: number;
+  targetEscapeY: number;
+  escapeQuality: number;
+  pressureScore: number;
+  noWin: boolean;
+}
+
+export interface TacticalPlan {
+  action: 'direct' | 'intercept' | 'pressure' | 'disengage' | 'farm' | 'reposition';
+  x: number;
+  y: number;
+  utility: number;
+  expectedGrowth: number;
+  survivalProbability: number;
+  positionQuality: number;
+  futureOpportunity: number;
+  risk: number;
+  interceptX: number;
+  interceptY: number;
+}
+
+function projectPoint(x: number, y: number, vx: number, vy: number, seconds: number, world: number, radius = 24): { x: number; y: number } {
+  let px = x + vx * seconds;
+  let py = y + vy * seconds;
+  const min = Math.max(18, radius);
+  const max = world - min;
+  if (px < min) px = min + (min - px) * 0.22;
+  if (px > max) px = max - (px - max) * 0.22;
+  if (py < min) py = min + (min - py) * 0.22;
+  if (py > max) py = max - (py - max) * 0.22;
+  return { x: clamp(px, min, max), y: clamp(py, min, max) };
+}
+
+function vectorLength(x: number, y: number): number {
+  return Math.hypot(x, y) || 1;
+}
+
+function directionTo(fromX: number, fromY: number, toX: number, toY: number): { x: number; y: number } {
+  const length = vectorLength(toX - fromX, toY - fromY);
+  return { x: (toX - fromX) / length, y: (toY - fromY) / length };
+}
+
+/**
+ * Predict a moving target's intercept point with a few bounded iterations.
+ * This is intentionally a kinematic forecast, not a hidden look-ahead into
+ * the engine: only the target's observed position and velocity are used.
+ */
+export function predictIntercept(args: {
+  selfX: number;
+  selfY: number;
+  selfSpeed: number;
+  selfRadius?: number;
+  targetX: number;
+  targetY: number;
+  targetVx: number;
+  targetVy: number;
+  targetRadius?: number;
+  world: number;
+  horizon?: number;
+  iterations?: number;
+}): {
+  x: number;
+  y: number;
+  time: number;
+  targetEscapeX: number;
+  targetEscapeY: number;
+  escapeQuality: number;
+} {
+  const horizon = args.horizon ?? AI.planning.predictionHorizon;
+  const iterations = Math.max(1, Math.min(8, args.iterations ?? AI.planning.interceptIterations));
+  const targetRadius = args.targetRadius ?? 20;
+  const selfSpeed = Math.max(20, args.selfSpeed);
+  const initialDistance = hypot(args.targetX - args.selfX, args.targetY - args.selfY);
+  let time = clamp(initialDistance / selfSpeed, 0.08, horizon);
+  let target = projectPoint(args.targetX, args.targetY, args.targetVx, args.targetVy, time, args.world, targetRadius);
+  for (let i = 0; i < iterations; i++) {
+    const distance = hypot(target.x - args.selfX, target.y - args.selfY);
+    const toTarget = directionTo(args.selfX, args.selfY, target.x, target.y);
+    const targetOpening = args.targetVx * toTarget.x + args.targetVy * toTarget.y;
+    const closingSpeed = Math.max(18, selfSpeed - targetOpening);
+    time = clamp(distance / closingSpeed, 0.08, horizon);
+    target = projectPoint(args.targetX, args.targetY, args.targetVx, args.targetVy, time, args.world, targetRadius);
+  }
+  const velocityLength = hypot(args.targetVx, args.targetVy);
+  const heading = velocityLength > 12
+    ? { x: args.targetVx / velocityLength, y: args.targetVy / velocityLength }
+    : directionTo(args.selfX, args.selfY, args.targetX, args.targetY);
+  const escapePoint = projectPoint(
+    args.targetX,
+    args.targetY,
+    heading.x * Math.max(55, velocityLength),
+    heading.y * Math.max(55, velocityLength),
+    1.1,
+    args.world,
+    targetRadius,
+  );
+  const edge = Math.min(escapePoint.x, escapePoint.y, args.world - escapePoint.x, args.world - escapePoint.y);
+  const escapeQuality = clamp(edge / 520, 0, 1) * (velocityLength > 16 ? 0.82 : 0.68);
+  return {
+    x: clamp(target.x, 28, args.world - 28),
+    y: clamp(target.y, 28, args.world - 28),
+    time,
+    targetEscapeX: escapePoint.x,
+    targetEscapeY: escapePoint.y,
+    escapeQuality,
+  };
+}
+
+/** Estimate a catch before a bot commits to a chase or split. */
+export function evaluateHunt(args: {
+  selfX: number;
+  selfY: number;
+  selfMass: number;
+  selfSpeed: number;
+  selfRadius: number;
+  preyX: number;
+  preyY: number;
+  preyVx: number;
+  preyVy: number;
+  preyMass: number;
+  preyRadius: number;
+  world: number;
+  threatDanger?: number;
+  competitorRisk?: number;
+  pressureDistance?: number;
+}): HuntEvaluation {
+  const prediction = predictIntercept({
+    selfX: args.selfX,
+    selfY: args.selfY,
+    selfSpeed: args.selfSpeed,
+    selfRadius: args.selfRadius,
+    targetX: args.preyX,
+    targetY: args.preyY,
+    targetVx: args.preyVx,
+    targetVy: args.preyVy,
+    targetRadius: args.preyRadius,
+    world: args.world,
+  });
+  const distance = hypot(args.preyX - args.selfX, args.preyY - args.selfY);
+  const ratio = args.selfMass / Math.max(1, args.preyMass);
+  const massAdvantage = clamp((ratio - BALANCE.eatRatio) / 2.2, 0, 1);
+  const proximity = clamp(1 - distance / 1200, 0, 1);
+  const radial = directionTo(args.selfX, args.selfY, args.preyX, args.preyY);
+  const targetOpening = args.preyVx * radial.x + args.preyVy * radial.y;
+  const closing = args.selfSpeed - targetOpening;
+  const speedAdvantage = clamp((closing + 40) / Math.max(80, args.selfSpeed + 110), 0, 1);
+  const boundaryTrap = 1 - prediction.escapeQuality;
+  const threatRisk = clamp(args.threatDanger ?? 0, 0, 4);
+  const competitorRisk = clamp(args.competitorRisk ?? 0, 0, 3);
+  const reachBonus = prediction.time < 0.75 ? 0.22 : 0;
+  const probability = clamp(
+    0.06
+      + massAdvantage * 0.34
+      + proximity * 0.18
+      + speedAdvantage * 0.2
+      + boundaryTrap * 0.14
+      + reachBonus
+      - threatRisk * 0.12
+      - competitorRisk * 0.1,
+    0.02,
+    0.98,
+  );
+  const pressureDistance = args.pressureDistance ?? AI.planning.pressureDistance;
+  const pressure = clamp(
+    (massAdvantage * 0.42 + speedAdvantage * 0.3 + boundaryTrap * 0.24)
+      * clamp(1 - distance / pressureDistance, 0, 1)
+      - threatRisk * 0.12
+      - competitorRisk * 0.08,
+    0,
+    1,
+  );
+  const noWin = probability < AI.planning.noWinProbability
+    && distance > args.selfRadius + args.preyRadius + 90;
+  return {
+    successProbability: probability,
+    timeToIntercept: prediction.time,
+    interceptX: prediction.x,
+    interceptY: prediction.y,
+    targetEscapeX: prediction.targetEscapeX,
+    targetEscapeY: prediction.targetEscapeY,
+    escapeQuality: prediction.escapeQuality,
+    pressureScore: pressure,
+    noWin,
+  };
+}
+
+export function classifySituation(args: {
+  dangerLevel: number;
+  opportunityLevel: number;
+  crowdingLevel: number;
+  mobilityLevel: number;
+  growthPotential: number;
+  escapeQuality: number;
+  hasThreat: boolean;
+  hasPrey: boolean;
+  splitOpportunity: boolean;
+  virusOpportunity: boolean;
+  vulnerable: boolean;
+  wallDanger: number;
+}): { situation: AiSituation; confidence: number } {
+  if (args.vulnerable) return { situation: 'POST_SPLIT_VULNERABILITY', confidence: 0.94 };
+  if (args.dangerLevel >= AI.context.emergencyDanger) {
+    if (args.mobilityLevel < AI.context.lowMobility || args.escapeQuality < AI.context.lowMobility) {
+      return { situation: 'TRAPPED', confidence: 0.92 };
+    }
+    if (args.crowdingLevel >= AI.context.crowdDanger) return { situation: 'MULTI_THREAT', confidence: 0.9 };
+    return { situation: 'PREDATOR_NEAR', confidence: 0.9 };
+  }
+  if (args.crowdingLevel >= AI.context.crowdDanger && args.dangerLevel > AI.context.safeDanger) {
+    return { situation: 'MULTI_THREAT', confidence: 0.82 };
+  }
+  if (args.crowdingLevel >= AI.context.crowdDanger) return { situation: 'CROWDED', confidence: 0.78 };
+  if (args.virusOpportunity && args.dangerLevel < AI.context.safeDanger) {
+    return { situation: 'VIRUS_OPPORTUNITY', confidence: 0.72 };
+  }
+  if (args.splitOpportunity && args.opportunityLevel >= AI.context.goodOpportunity && args.dangerLevel < AI.context.emergencyDanger) {
+    return { situation: 'SPLIT_OPPORTUNITY', confidence: 0.82 };
+  }
+  if (args.hasPrey && args.opportunityLevel >= AI.context.goodOpportunity) {
+    return { situation: 'CHASE_OPPORTUNITY', confidence: 0.8 };
+  }
+  if (args.hasThreat && args.dangerLevel > AI.context.safeDanger) {
+    return { situation: 'DANGEROUS_FARM', confidence: 0.76 };
+  }
+  if (args.hasThreat && args.escapeQuality >= AI.context.goodEscape) {
+    return { situation: 'ESCAPE_WINDOW', confidence: 0.68 };
+  }
+  if (args.wallDanger > 0.62 || args.mobilityLevel < AI.context.lowMobility) {
+    return { situation: 'RECOVERY', confidence: 0.72 };
+  }
+  if (args.growthPotential > 0.75) return { situation: 'SAFE_FARM', confidence: 0.74 };
+  return { situation: 'PREY_NEAR', confidence: 0.55 };
 }
 
 export function chooseEscape(args: {
@@ -565,66 +1060,217 @@ export function chooseEscape(args: {
   boundaryLesson?: number;
   ownerId?: number;
   time?: number;
-}): { x: number; y: number; score: number } {
-  const headings = AI.performance.headings;
+  crowd?: Array<Pick<Cell, 'x' | 'y' | 'mass' | 'radius'>>;
+}): { x: number; y: number; score: number; quality: number; corridorX: number; corridorY: number; timeToSafety: number } {
+  const headings = Math.max(6, AI.performance.headings);
   const jitter = (unitHash((args.ownerId ?? 1) * 17 + Math.floor((args.time ?? 0) * 2)) - 0.5) * 0.2;
   const fear = args.virusFear ?? 1;
   const lesson = args.boundaryLesson ?? 0;
   const pops = args.mass >= BALANCE.virusTriggerMass * AI.virus.fearScale;
+  const currentWall = boundaryDanger(args.x, args.y, args.world, AI.flee.wallMargin);
+  const relevantVirus = args.viruses.some(virus => {
+    const distance = hypot(virus.x - args.x, virus.y - args.y);
+    return (virus.mother && args.mass < BALANCE.motherDigestMass)
+      || (!virus.mother && pops && distance < virus.radius + args.radius + 80);
+  });
+  if (!args.threats.length && !relevantVirus && currentWall < 0.22 && (args.crowd?.length ?? 0) < 10) {
+    const angle = unitHash((args.ownerId ?? 1) * 29 + Math.floor((args.time ?? 0) * 1.5)) * TAU;
+    const targetX = clamp(args.x + Math.cos(angle) * AI.flee.aimDistance, 48, args.world - 48);
+    const targetY = clamp(args.y + Math.sin(angle) * AI.flee.aimDistance, 48, args.world - 48);
+    return { x: targetX, y: targetY, score: 1.5, quality: 0.9, corridorX: targetX, corridorY: targetY, timeToSafety: 0 };
+  }
   let best = -Infinity;
+  let bestQuality = 0;
   let bestX = args.x;
   let bestY = args.y;
+  let bestTime = AI.flee.lookahead[AI.flee.lookahead.length - 1] / Math.max(70, args.speed);
   const primary = args.threats[0];
   for (let i = 0; i < headings; i++) {
     const angle = (i / headings) * TAU + jitter;
     const dx = Math.cos(angle);
     const dy = Math.sin(angle);
     let score = 0;
-    for (const dist of AI.flee.lookahead) {
-      const rawX = args.x + dx * dist;
-      const rawY = args.y + dy * dist;
+    let clearance = Infinity;
+    let routeDanger = 0;
+    for (const distance of AI.flee.lookahead) {
+      const horizon = distance / Math.max(70, args.speed);
+      const rawX = args.x + dx * distance;
+      const rawY = args.y + dy * distance;
       const px = clamp(rawX, 20, args.world - 20);
       const py = clamp(rawY, 20, args.world - 20);
       const shoved = hypot(px - rawX, py - rawY);
       if (shoved > 8) score -= 6 + shoved * 0.03;
       const edge = boundaryDanger(px, py, args.world, AI.flee.wallMargin);
-      score -= edge * edge * (16 + lesson * 10) * (dist / 340);
+      score -= edge * edge * (16 + lesson * 10) * (distance / 340);
+      routeDanger += edge * 0.42;
       for (const threat of args.threats) {
-        const horizon = dist / Math.max(70, args.speed);
-        const tx = threat.x + threat.vx * horizon * 0.7;
-        const ty = threat.y + threat.vy * horizon * 0.7;
-        const d = hypot(px - tx, py - ty);
+        const predicted = projectPoint(threat.x, threat.y, threat.vx, threat.vy, horizon, args.world, threat.radius);
+        const threatDistance = hypot(px - predicted.x, py - predicted.y);
         const dangerR = threat.radius + args.radius + 90;
-        if (d < dangerR) score -= (1 - d / dangerR) * (8 + threat.score * 6);
-        else score += Math.min(2.2, (d - dangerR) / 180) * (0.3 + threat.score * 0.12);
+        clearance = Math.min(clearance, threatDistance - dangerR);
+        if (threatDistance < dangerR) score -= (1 - threatDistance / dangerR) * (10 + threat.score * 7);
+        else score += Math.min(2.7, (threatDistance - dangerR) / 180) * (0.4 + threat.score * 0.15);
+        const awayX = px - predicted.x;
+        const awayY = py - predicted.y;
+        const awayLength = vectorLength(awayX, awayY);
+        score += (awayX * dx + awayY * dy) / awayLength * Math.min(1.7, threat.score * 0.42);
+      }
+      const crowdPoints = args.crowd ?? [];
+      for (let crowdIndex = 0; crowdIndex < crowdPoints.length; crowdIndex++) {
+        const point = crowdPoints[crowdIndex];
+        const crowdDistance = hypot(px - point.x, py - point.y);
+        if (crowdDistance < args.radius + point.radius + 70 && point.mass < args.mass * 1.4) {
+          score -= (1 - crowdDistance / (args.radius + point.radius + 70)) * 1.2;
+        }
       }
       for (const virus of args.viruses) {
-        const d = hypot(px - virus.x, py - virus.y);
+        const virusDistance = hypot(px - virus.x, py - virus.y);
         if (virus.mother && args.mass < BALANCE.motherDigestMass) {
           const dangerR = virus.radius + args.radius + 70;
-          if (d < dangerR) score -= (1 - d / dangerR) * 7;
+          if (virusDistance < dangerR) score -= (1 - virusDistance / dangerR) * 8;
         } else if (!virus.mother && pops) {
           const dangerR = virus.radius + args.radius + 36;
-          if (d < dangerR) score -= (1 - d / dangerR) * 6.5 * fear * (1 + lesson * 0.15);
+          if (virusDistance < dangerR) score -= (1 - virusDistance / dangerR) * 7 * fear * (1 + lesson * 0.15);
         }
       }
     }
     if (primary) {
       const away = ((args.x - primary.x) * dx + (args.y - primary.y) * dy) / (primary.dist || 1);
-      score += away * 4.2;
+      score += away * 3.6;
     }
     if (boundaryDanger(args.x, args.y, args.world, AI.flee.wallMargin) > 0.22) {
       const center = ((args.world / 2 - args.x) * dx + (args.world / 2 - args.y) * dy) / args.world;
-      score += center * 3.6;
+      score += center * 4.4;
     }
+    const safeClearance = Number.isFinite(clearance) ? clamp(clearance / 520, 0, 1) : 0.75;
+    const quality = clamp(safeClearance * (1 - routeDanger / AI.flee.lookahead.length), 0, 1);
+    score += quality * 2.8;
     if (score > best) {
       best = score;
+      bestQuality = quality;
       bestX = clamp(args.x + dx * AI.flee.aimDistance, 48, args.world - 48);
       bestY = clamp(args.y + dy * AI.flee.aimDistance, 48, args.world - 48);
+      bestTime = AI.flee.lookahead[AI.flee.lookahead.length - 1] / Math.max(70, args.speed);
     }
   }
-  if (!Number.isFinite(bestX) || !Number.isFinite(bestY)) return { x: args.x, y: args.y, score: 0 };
-  return { x: bestX, y: bestY, score: best };
+  if (!Number.isFinite(bestX) || !Number.isFinite(bestY)) {
+    return { x: args.x, y: args.y, score: 0, quality: 0, corridorX: args.x, corridorY: args.y, timeToSafety: 0 };
+  }
+  return { x: bestX, y: bestY, score: best, quality: bestQuality, corridorX: bestX, corridorY: bestY, timeToSafety: bestTime };
+}
+
+/** Evaluate a handful of future routes instead of committing to the first visible prey. */
+export function planTacticalActions(args: {
+  selfX: number;
+  selfY: number;
+  selfSpeed: number;
+  selfMass: number;
+  selfRadius: number;
+  world: number;
+  prey?: { x: number; y: number; vx: number; vy: number; mass: number; radius: number; evaluation: HuntEvaluation };
+  food?: { x: number; y: number; score: number };
+  threats: Array<Pick<ThreatInfo, 'x' | 'y' | 'vx' | 'vy' | 'mass' | 'radius' | 'score'>>;
+  escape: { x: number; y: number; quality: number };
+  viruses?: Array<Pick<Virus, 'x' | 'y' | 'radius' | 'mother'>>;
+  crowd?: Array<Pick<Cell, 'x' | 'y' | 'mass' | 'radius'>>;
+  dangerLevel: number;
+  crowdingLevel: number;
+  /** 1 for combat focus, less than 1 for far/irrelevant LOD. */
+  detail?: number;
+}): TacticalPlan {
+  const detail = clamp(args.detail ?? 1, 0.35, 1);
+  if (!args.prey && !args.threats.length && args.food && args.dangerLevel < AI.context.safeDanger && args.crowdingLevel < AI.context.crowdDanger) {
+    return {
+      action: 'farm', x: args.food.x, y: args.food.y, utility: args.food.score * 8,
+      expectedGrowth: args.food.score * 14, survivalProbability: 0.96, positionQuality: 0.86,
+      futureOpportunity: args.food.score, risk: 0.08, interceptX: args.selfX, interceptY: args.selfY,
+    };
+  }
+  const candidates: Array<{ action: TacticalPlan['action']; x: number; y: number; growth: number; future: number }> = [];
+  if (args.prey) {
+    const prey = args.prey;
+    const direct = directionTo(args.selfX, args.selfY, prey.x, prey.y);
+    const perpendicular = { x: -direct.y, y: direct.x };
+    candidates.push(
+      { action: 'direct', x: prey.x, y: prey.y, growth: prey.mass * prey.evaluation.successProbability, future: 0.18 },
+      { action: 'intercept', x: prey.evaluation.interceptX, y: prey.evaluation.interceptY, growth: prey.mass * (prey.evaluation.successProbability + 0.08), future: 0.3 },
+      { action: 'pressure', x: prey.evaluation.interceptX + perpendicular.x * 110, y: prey.evaluation.interceptY + perpendicular.y * 110, growth: prey.mass * prey.evaluation.pressureScore * 0.72, future: 0.46 },
+    );
+  }
+  if (args.food) candidates.push({ action: 'farm', x: args.food.x, y: args.food.y, growth: args.food.score * 14, future: 0.35 });
+  candidates.push(
+    { action: 'disengage', x: args.escape.x, y: args.escape.y, growth: 0, future: args.escape.quality * 1.6 },
+    { action: 'reposition', x: args.world / 2, y: args.world / 2, growth: 0, future: 0.45 },
+  );
+  let best: TacticalPlan | null = null;
+  const samples = Math.max(2, Math.round(AI.performance.tacticalSamples * detail));
+  const threatLimit = Math.min(args.threats.length, args.prey ? (detail < 0.8 ? 3 : 5) : 2);
+  const virusLimit = Math.min((args.viruses ?? []).length, args.prey ? (detail < 0.8 ? 5 : 8) : 4);
+  const crowdLimit = Math.min((args.crowdingLevel > 0 ? 24 : 0), args.prey ? (detail < 0.8 ? 8 : 12) : 5);
+  for (const candidate of candidates) {
+    const direction = directionTo(args.selfX, args.selfY, candidate.x, candidate.y);
+    let danger = 0;
+    for (let sample = 1; sample <= samples; sample++) {
+      const t = AI.performance.tacticalHorizon * sample / samples;
+      const px = clamp(args.selfX + direction.x * args.selfSpeed * t, args.selfRadius, args.world - args.selfRadius);
+      const py = clamp(args.selfY + direction.y * args.selfSpeed * t, args.selfRadius, args.world - args.selfRadius);
+      const wall = boundaryDanger(px, py, args.world, AI.flee.wallMargin);
+      danger += wall * 0.72;
+      for (let threatIndex = 0; threatIndex < threatLimit; threatIndex++) {
+        const threat = args.threats[threatIndex];
+        const projected = projectPoint(threat.x, threat.y, threat.vx, threat.vy, t, args.world, threat.radius);
+        const d = hypot(px - projected.x, py - projected.y);
+        const safe = threat.radius + args.selfRadius + 80;
+        if (d < safe) danger += (1 - d / safe) * (0.85 + threat.score * 0.38);
+      }
+      for (let virusIndex = 0; virusIndex < virusLimit; virusIndex++) {
+        const virus = args.viruses![virusIndex];
+        const d = hypot(px - virus.x, py - virus.y);
+        if (!virus.mother && args.selfMass >= BALANCE.virusTriggerMass && d < virus.radius + args.selfRadius + 42) danger += 0.42;
+        if (virus.mother && d < virus.radius + args.selfRadius + 72) danger += 0.32;
+      }
+      const crowdPoints = args.crowd ?? [];
+      for (let crowdIndex = 0; crowdIndex < Math.min(crowdPoints.length, crowdLimit); crowdIndex++) {
+        const point = crowdPoints[crowdIndex];
+        const d = hypot(px - point.x, py - point.y);
+        if (d < args.selfRadius + point.radius + 70 && point.mass < args.selfMass * 1.4) {
+          danger += (1 - d / (args.selfRadius + point.radius + 70)) * 0.18;
+        }
+      }
+    }
+    const averageDanger = danger / samples;
+    const survivalProbability = clamp(Math.exp(-(averageDanger + args.dangerLevel * 0.32)), 0.02, 1);
+    const positionQuality = clamp(
+      0.58 + (1 - boundaryDanger(candidate.x, candidate.y, args.world, AI.flee.wallMargin)) * 0.32
+        - args.crowdingLevel * 0.018,
+      0,
+      1,
+    );
+    const risk = averageDanger * 3.2 + args.dangerLevel * 0.65;
+    const utility = candidate.growth * survivalProbability * positionQuality
+      + candidate.future * 4.2
+      + survivalProbability * 1.2
+      - risk;
+    const plan: TacticalPlan = {
+      action: candidate.action,
+      x: clamp(candidate.x, 30, args.world - 30),
+      y: clamp(candidate.y, 30, args.world - 30),
+      utility,
+      expectedGrowth: candidate.growth,
+      survivalProbability,
+      positionQuality,
+      futureOpportunity: candidate.future,
+      risk,
+      interceptX: args.prey?.evaluation.interceptX ?? args.selfX,
+      interceptY: args.prey?.evaluation.interceptY ?? args.selfY,
+    };
+    if (!best || plan.utility > best.utility) best = plan;
+  }
+  return best ?? {
+    action: 'disengage', x: args.escape.x, y: args.escape.y, utility: 0,
+    expectedGrowth: 0, survivalProbability: args.escape.quality, positionQuality: args.escape.quality,
+    futureOpportunity: 0, risk: 0, interceptX: args.selfX, interceptY: args.selfY,
+  };
 }
 
 export function scorePrey(args: {
@@ -642,9 +1288,27 @@ export function scorePrey(args: {
   perception: number;
   world: number;
   threatDanger: number;
+  competitorRisk?: number;
   predict: number;
   splitUrge: number;
-}): { score: number; aimX: number; aimY: number; freeKill: boolean; canSplit: boolean; dist: number; catchable: boolean } | null {
+}): {
+  score: number;
+  aimX: number;
+  aimY: number;
+  freeKill: boolean;
+  canSplit: boolean;
+  dist: number;
+  catchable: boolean;
+  successProbability: number;
+  timeToIntercept: number;
+  escapeQuality: number;
+  pressureScore: number;
+  competitorRisk: number;
+  interceptX: number;
+  interceptY: number;
+  targetEscapeX: number;
+  targetEscapeY: number;
+} | null {
   const dist = hypot(args.preyX - args.selfX, args.preyY - args.selfY);
   if (!Number.isFinite(dist) || dist > args.perception || args.preyMass < AI.hunt.minPreyMass) return null;
   const ratio = args.selfMass / Math.max(1, args.preyMass);
@@ -660,12 +1324,31 @@ export function scorePrey(args: {
   const opening = args.preyVx * toX + args.preyVy * toY;
   const catchRate = args.selfSpeed - opening;
   const catchable = catchRate > -8 || dist < args.selfRadius + args.preyRadius + 80 || (canSplit && dist < reach * 0.85);
-  const lead = dist / Math.max(50, args.selfSpeed);
-  let aimX = args.preyX + args.preyVx * lead * args.predict;
-  let aimY = args.preyY + args.preyVy * lead * args.predict;
-  const refined = hypot(aimX - args.selfX, aimY - args.selfY) / Math.max(50, args.selfSpeed);
-  aimX = args.preyX + args.preyVx * refined * args.predict;
-  aimY = args.preyY + args.preyVy * refined * args.predict;
+  const evaluation = evaluateHunt({
+    selfX: args.selfX,
+    selfY: args.selfY,
+    selfMass: args.selfMass,
+    selfSpeed: args.selfSpeed,
+    selfRadius: args.selfRadius,
+    preyX: args.preyX,
+    preyY: args.preyY,
+    preyVx: args.preyVx,
+    preyVy: args.preyVy,
+    preyMass: args.preyMass,
+    preyRadius: args.preyRadius,
+    world: args.world,
+    threatDanger: args.threatDanger,
+    competitorRisk: args.competitorRisk,
+  });
+  // An impossible chase is not a valid opportunity. Close targets are kept
+  // because a split or a pressure move can still convert them.
+  if (evaluation.noWin && !canSplit && dist > AI.planning.pressureDistance) return null;
+  let aimX = evaluation.interceptX;
+  let aimY = evaluation.interceptY;
+  if (args.predict < 0.8) {
+    aimX = args.preyX * (1 - args.predict) + aimX * args.predict;
+    aimY = args.preyY * (1 - args.predict) + aimY * args.predict;
+  }
   // Don't dive deeper into a corner than the prey. Cut them off from the open side.
   const preyWall = boundaryDanger(args.preyX, args.preyY, args.world, 280);
   const aimWall = boundaryDanger(aimX, aimY, args.world, 220);
@@ -677,16 +1360,38 @@ export function scorePrey(args: {
   aimY = clamp(aimY, 36, args.world - 36);
   const distFactor = clamp(1.55 - dist / args.perception, 0.18, 1.55);
   let score = Math.sqrt(args.preyMass) * 0.22 * (catchable ? 1 : 0.22) * distFactor;
+  score *= 0.56 + evaluation.successProbability * 0.8;
   score *= 1 + clamp((ratio - 1.25) / 5, 0, 0.7);
   if (canSplit && dist < reach) score += 0.35 * args.splitUrge;
+  score += evaluation.pressureScore * 0.65;
   score -= args.threatDanger * 2.4;
+  score -= (args.competitorRisk ?? 0) * 0.8;
   const trap = boundaryDanger(aimX, aimY, args.world, 240);
   score -= trap * 1.7;
   if (trap > 0.62 && boundaryDanger(args.selfX, args.selfY, args.world, 240) < 0.3) score -= 1.6;
   if (!catchable && !canSplit) score *= 0.35;
-  const freeKill = canEat && ratio >= AI.hunt.freeKillRatio && dist < AI.hunt.freeKillDist && args.threatDanger < 0.35 && catchable && trap < 0.55;
+  const freeKill = canEat && ratio >= AI.hunt.freeKillRatio && dist < AI.hunt.freeKillDist
+    && args.threatDanger < 0.35 && (args.competitorRisk ?? 0) < 0.35
+    && catchable && trap < 0.55;
   if (freeKill) score += 1.1;
-  return { score, aimX, aimY, freeKill, canSplit, dist, catchable };
+  return {
+    score,
+    aimX,
+    aimY,
+    freeKill,
+    canSplit,
+    dist,
+    catchable,
+    successProbability: evaluation.successProbability,
+    timeToIntercept: evaluation.timeToIntercept,
+    escapeQuality: evaluation.escapeQuality,
+    pressureScore: evaluation.pressureScore,
+    competitorRisk: args.competitorRisk ?? 0,
+    interceptX: evaluation.interceptX,
+    interceptY: evaluation.interceptY,
+    targetEscapeX: evaluation.targetEscapeX,
+    targetEscapeY: evaluation.targetEscapeY,
+  };
 }
 
 export function splitDecision(args: {
@@ -706,7 +1411,10 @@ export function splitDecision(args: {
   splitLesson: number;
   world: number;
   cooldownReady: boolean;
-}): { yes: boolean; risky: boolean } {
+  successProbability?: number;
+  competitorRisk?: number;
+  escapeQuality?: number;
+}): { yes: boolean; risky: boolean; confidence?: number; landX?: number; landY?: number } {
   if (!args.cooldownReady) return { yes: false, risky: false };
   if (args.selfMass < BALANCE.minSplitMass) return { yes: false, risky: false };
   const maxPieces = args.splitUrge > 1 ? AI.split.maxPiecesBold : AI.split.maxPiecesCautious;
@@ -720,6 +1428,8 @@ export function splitDecision(args: {
   const landX = args.selfX + Math.cos(angle) * (args.selfRadius + 90);
   const landY = args.selfY + Math.sin(angle) * (args.selfRadius + 90);
   const pieceRadius = massRadius(half);
+  const futureRisk = (args.competitorRisk ?? 0) * 0.32 + (1 - (args.escapeQuality ?? 0.82)) * 0.24;
+  if ((args.successProbability ?? 0.8) < 0.28 && futureRisk > 0.32) return { yes: false, risky: true, confidence: 0.18, landX, landY };
   for (const threat of args.threats) {
     if (threat.mass <= half * BALANCE.eatRatio) continue;
     const landDist = hypot(threat.x - landX, threat.y - landY);
@@ -734,10 +1444,12 @@ export function splitDecision(args: {
       }
     }
   }
-  const confidence = args.splitUrge * args.splitBias * (1 - args.splitLesson * 0.45);
-  if (args.preyMass * confidence < AI.split.minReward) return { yes: false, risky: false };
-  if (confidence < 0.22) return { yes: false, risky: false };
-  return { yes: true, risky: false };
+  const confidence = args.splitUrge * args.splitBias * (1 - args.splitLesson * 0.45)
+    * (0.72 + (args.successProbability ?? 0.8) * 0.34)
+    * (1 - futureRisk * 0.36);
+  if (args.preyMass * confidence < AI.split.minReward) return { yes: false, risky: false, confidence, landX, landY };
+  if (confidence < 0.22) return { yes: false, risky: false, confidence, landX, landY };
+  return { yes: true, risky: false, confidence, landX, landY };
 }
 
 export function planVirus(args: {
@@ -798,7 +1510,7 @@ export function planVirus(args: {
   return { baitX, baitY, baitScore, feedAngle };
 }
 
-export function shouldSwitchTarget(currentScore: number, challengerScore: number, margin = AI.hunt.switchMargin): boolean {
+export function shouldSwitchTarget(currentScore: number, challengerScore: number, margin: number = AI.hunt.switchMargin): boolean {
   if (!(currentScore > 0)) return true;
   return challengerScore > currentScore * margin;
 }
@@ -1000,6 +1712,8 @@ function collectThreats(
       canEat: best.canEat,
       splitKill: best.splitKill,
       gap: best.gap,
+      timeToIntercept: best.timeToIntercept,
+      approach: best.closing,
     });
   }
   found.sort((a, b) => b.score - a.score);
@@ -1034,22 +1748,44 @@ function selectPrey(
     const pvy = (other.y - other.ly) * STEP_RATE;
     let threatDanger = 0;
     for (const threat of threats) {
-      if (hypot(threat.x - other.x, threat.y - other.y) < 420 && threat.mass > self.mass * BALANCE.eatRatio * 0.95) {
+      if (threat.ownerId === other.owner) continue;
+      if (hypot(threat.x - other.x, threat.y - other.y) < 420 && threat.mass > other.mass * BALANCE.eatRatio * 0.95) {
         threatDanger += threat.score * 0.85;
       }
+    }
+    // A rival fighting the prey is an opportunity, but also a third-party risk.
+    // It is bounded to the already perceived local cells; no global knowledge.
+    let competitorRisk = 0;
+    const inspectCompetition = other.id === brain.targetCellId || other.mass > self.largestMass * 0.14;
+    const competitorLimit = Math.min(cells.length, 20);
+    for (let competitorIndex = 0; inspectCompetition && competitorIndex < competitorLimit; competitorIndex++) {
+      const competitor = cells[competitorIndex];
+      if (!competitor.alive || competitor.owner === owner.id || competitor.owner === other.owner) continue;
+      if (mode === 'teams') {
+        const competitorOwner = ownerOf(competitor.owner);
+        if (competitorOwner?.team === owner.team) continue;
+      }
+      const competitorDistance = hypot(competitor.x - other.x, competitor.y - other.y);
+      if (competitorDistance > 430 || competitor.mass < other.mass * BALANCE.eatRatio) continue;
+      competitorRisk += clamp((1 - competitorDistance / 430) * (competitor.mass / Math.max(1, self.largestMass)), 0, 1.25);
     }
     const scored = scorePrey({
       selfX: self.x, selfY: self.y, selfMass: self.largestMass, selfRadius: self.radius, selfSpeed: self.speed,
       preyX: other.x, preyY: other.y, preyVx: pvx, preyVy: pvy,
       preyMass: other.mass, preyRadius: other.radius,
-      perception, world, threatDanger, predict, splitUrge: personality.split,
+      perception, world, threatDanger, competitorRisk, predict, splitUrge: personality.split,
     });
     if (!scored) continue;
     let score = scored.score;
+    if (competitorRisk > 0.35 && personality.chase < 1) score *= 0.72;
     if (other.id === brain.targetCellId) {
       const stalled = time - brain.lastProgressAt;
       const chasing = time - brain.chaseSince;
-      if (chasing > personality.persistence * brain.lessons.chase && stalled > AI.hunt.abandonProgress) {
+      if (scored.successProbability < AI.planning.noWinProbability && chasing > AI.planning.noWinGrace) {
+        brain.abandonOwner = other.owner;
+        brain.abandonUntil = time + AI.memory.abandonSeconds;
+        score *= 0.08;
+      } else if (chasing > personality.persistence * brain.lessons.chase && stalled > AI.hunt.abandonProgress) {
         brain.abandonOwner = other.owner;
         brain.abandonUntil = time + AI.memory.abandonSeconds;
         score *= 0.15;
@@ -1070,6 +1806,15 @@ function selectPrey(
       aimY: scored.aimY,
       freeKill: scored.freeKill,
       canSplit: scored.canSplit,
+      successProbability: scored.successProbability,
+      timeToIntercept: scored.timeToIntercept,
+      escapeQuality: scored.escapeQuality,
+      pressureScore: scored.pressureScore,
+      competitorRisk,
+      interceptX: scored.interceptX,
+      interceptY: scored.interceptY,
+      targetEscapeX: scored.targetEscapeX,
+      targetEscapeY: scored.targetEscapeY,
     };
     if (!best || score > best.score) best = choice;
     if (scored.dist > AI.perception.noiseMinDist) {
@@ -1080,7 +1825,8 @@ function selectPrey(
     }
     if (other.id === brain.targetCellId) locked = choice;
   }
-  if (locked && best && locked.id !== best.id && !shouldSwitchTarget(locked.score, best.score)) return locked;
+  const commitmentMargin = AI.hunt.switchMargin + brain.targetCommitment * AI.planning.commitmentBonus;
+  if (locked && best && locked.id !== best.id && !shouldSwitchTarget(locked.score, best.score, commitmentMargin)) return locked;
   return best;
 }
 
@@ -1165,23 +1911,30 @@ function explorePoint(self: SelfView, brain: BotBrain, personality: Personality,
   return { x: clamp(x, 70, world - 70), y: clamp(y, 70, world - 70) };
 }
 
-function separation(self: SelfView, cells: Cell[], ownerId: number): { x: number; y: number; crowd: number } {
+function separation(self: SelfView, cells: Cell[], ownerId: number): {
+  x: number;
+  y: number;
+  crowd: number;
+  points: Array<Pick<Cell, 'x' | 'y' | 'mass' | 'radius'>>;
+} {
   let sx = 0;
   let sy = 0;
   let crowd = 0;
+  const points: Array<Pick<Cell, 'x' | 'y' | 'mass' | 'radius'>> = [];
   for (const cell of cells) {
     if (cell.owner === ownerId) continue;
     const dx = self.x - cell.x;
     const dy = self.y - cell.y;
     const dist = hypot(dx, dy);
     if (dist < 320) crowd++;
+    if (dist < 620 && points.length < 24) points.push(cell);
     const ratio = cell.mass / Math.max(1, self.largestMass);
     if (dist > 1 && dist < self.radius + cell.radius + 36 && ratio > 0.75 && ratio < 1.35) {
       sx += dx / dist * 28;
       sy += dy / dist * 28;
     }
   }
-  return { x: sx, y: sy, crowd };
+  return { x: sx, y: sy, crowd, points };
 }
 
 export function think(input: ThinkInput): Decision {
@@ -1199,10 +1952,11 @@ export function think(input: ThinkInput): Decision {
   const nearbyViruses = input.viruses.filter(virus => hypot(virus.x - self.x, virus.y - self.y) <= perception);
   const prey = selectPrey(owner, self, input.cells, threats, input.ownerOf, brain, personality, perception, world, mode, time);
   const food = bestFood(self, input.foodNear, input.ejected, threats, nearbyViruses, brain, world, time, owner.id);
+  const space = separation(self, input.cells, owner.id);
   const escape = chooseEscape({
     x: self.x, y: self.y, speed: self.speed, radius: self.radius, mass: self.mass, world,
     threats, viruses: nearbyViruses, virusFear: personality.virusFear * (1 + brain.lessons.virus * 0.4),
-    boundaryLesson: brain.lessons.boundary, ownerId: owner.id, time,
+    boundaryLesson: brain.lessons.boundary, ownerId: owner.id, time, crowd: space.points,
   });
   const virus = planVirus({
     x: self.x, y: self.y, mass: self.mass, radius: self.radius, world,
@@ -1255,11 +2009,92 @@ export function think(input: ThinkInput): Decision {
   }
   if (virusHazard > 0.4) fleeScore = Math.max(fleeScore, 2.1 + virusHazard);
 
+  const dangerLevel = clamp(
+    (active?.score ?? 0) + surround * 0.38 + virusHazard * 0.72 + wall * 0.32,
+    0,
+    4,
+  );
+  const crowdingLevel = space.crowd;
+  const growthPotential = clamp((food?.score ?? 0) / 2.4, 0, 1);
+  const mobilityLevel = clamp(escape.quality * (1 - Math.min(0.42, crowdingLevel * 0.018)) + (1 - wall) * 0.12, 0, 1);
+  const opportunityLevel = Math.max(
+    prey ? prey.score * (0.65 + prey.successProbability * 0.55) : 0,
+    food ? food.score : 0,
+  );
+  const situationResult = classifySituation({
+    dangerLevel,
+    opportunityLevel,
+    crowdingLevel,
+    mobilityLevel,
+    growthPotential,
+    escapeQuality: escape.quality,
+    hasThreat: !!active,
+    hasPrey: !!prey,
+    splitOpportunity: !!prey?.canSplit && prey.successProbability > 0.52,
+    virusOpportunity: virus.baitScore > 0.7 || virus.feedAngle !== null,
+    vulnerable: time < brain.vulnerableUntil,
+    wallDanger: wall,
+  });
+  const huntEvaluation = prey ? {
+    successProbability: prey.successProbability,
+    timeToIntercept: prey.timeToIntercept,
+    interceptX: prey.interceptX,
+    interceptY: prey.interceptY,
+    targetEscapeX: prey.targetEscapeX,
+    targetEscapeY: prey.targetEscapeY,
+    escapeQuality: prey.escapeQuality,
+    pressureScore: prey.pressureScore,
+    noWin: prey.successProbability < AI.planning.noWinProbability,
+  } : undefined;
+  const tactical = planTacticalActions({
+    selfX: self.x,
+    selfY: self.y,
+    selfSpeed: self.speed,
+    selfMass: self.mass,
+    selfRadius: self.radius,
+    world,
+    prey: prey && huntEvaluation ? {
+      x: prey.x, y: prey.y, vx: prey.vx, vy: prey.vy,
+      mass: prey.mass, radius: prey.radius, evaluation: huntEvaluation,
+    } : undefined,
+    food: food ? { x: food.x, y: food.y, score: food.score } : undefined,
+    threats,
+    escape,
+    viruses: nearbyViruses,
+    crowd: space.points,
+    dangerLevel,
+    crowdingLevel,
+    detail: input.focusDist > AI.performance.farDistance ? 0.5 : 1,
+  });
+  brain.situation = situationResult.situation;
+  brain.dangerLevel = dangerLevel;
+  brain.opportunityLevel = opportunityLevel;
+  brain.crowdingLevel = crowdingLevel;
+  brain.mobilityLevel = mobilityLevel;
+  brain.growthPotential = growthPotential;
+  brain.escapeQuality = escape.quality;
+  brain.strategyConfidence = situationResult.confidence;
+  brain.targetScore = prey?.score ?? 0;
+  brain.interceptX = prey?.interceptX ?? self.x;
+  brain.interceptY = prey?.interceptY ?? self.y;
+  brain.targetEscapeX = huntEvaluation?.targetEscapeX ?? self.x;
+  brain.targetEscapeY = huntEvaluation?.targetEscapeY ?? self.y;
+  brain.timeToIntercept = prey?.timeToIntercept ?? Infinity;
+  brain.huntProbability = prey?.successProbability ?? 0;
+  brain.pressureScore = prey?.pressureScore ?? 0;
+  brain.lastFreeKill = prey?.freeKill ?? false;
+  if (active) rememberDanger(brain, active.x, active.y, active.score, time);
+
   let huntScore = 0;
   let stalkScore = 0;
   if (prey) {
-    huntScore = prey.score * personality.chase * size.hunt * brain.lessons.chase * (0.75 + brain.risk * 0.35);
+    huntScore = prey.score * personality.chase * size.hunt * brain.lessons.chase
+      * (0.72 + brain.risk * 0.34) * (0.62 + prey.successProbability * 0.58);
+    if (tactical.action === 'intercept') huntScore += 0.38 + prey.pressureScore * 0.32;
+    if (tactical.action === 'pressure') huntScore += prey.pressureScore * 0.56;
+    if (tactical.action === 'disengage' && !prey.freeKill) huntScore *= 0.58;
     if (prey.freeKill && !lethal) huntScore = Math.max(huntScore, 3.85);
+    if (prey.successProbability < AI.planning.noWinProbability && !prey.freeKill) huntScore *= 0.18;
     if (lethal) huntScore *= 0.22;
     if (cautious) huntScore *= 0.52;
     if (time < brain.finishUntil) huntScore += 1.15;
@@ -1289,7 +2124,6 @@ export function think(input: ThinkInput): Decision {
   let repositionScore = wall * (2.7 + brain.lessons.boundary * 1.5);
   if (prey && prey.dist < 200 && huntScore > 2.2) repositionScore *= 0.35;
 
-  const space = separation(self, input.cells, owner.id);
   if (space.crowd > 7 && self.mass < AI.size.small + 40) repositionScore += 0.7;
 
   if (brain.strategy === 'flee' && time - brain.since > AI.memory.fleeMax && !panic) {
@@ -1344,22 +2178,31 @@ export function think(input: ThinkInput): Decision {
     const len = prey.dist || 1;
     const px = -(prey.y - self.y) / len;
     const py = (prey.x - self.x) / len;
-    x = prey.aimX + px * side * (strategy === 'stalk' ? 1 : 0.25);
-    y = prey.aimY + py * side * (strategy === 'stalk' ? 1 : 0.25);
+    const plannedAim = tactical.action === 'intercept' || tactical.action === 'pressure'
+      ? { x: tactical.x, y: tactical.y }
+      : { x: prey.aimX, y: prey.aimY };
+    x = plannedAim.x + px * side * (strategy === 'stalk' ? 1 : 0.25);
+    y = plannedAim.y + py * side * (strategy === 'stalk' ? 1 : 0.25);
     if (strategy === 'stalk') {
       x = self.x * 0.35 + x * 0.65;
       y = self.y * 0.35 + y * 0.65;
     }
-    note = `${strategy}:${prey.ownerId}`;
+    note = `${strategy}:${prey.ownerId}:${situationResult.situation}`;
     if (brain.targetCellId !== prey.id) {
       brain.targetCellId = prey.id;
       brain.targetOwnerId = prey.ownerId;
+      brain.targetCommitment = 0.46;
+      brain.targetSeenAt = time;
       brain.chaseSince = time;
       brain.bestChaseDist = prey.dist;
       brain.lastProgressAt = time;
-    } else if (prey.dist < brain.bestChaseDist - 12) {
-      brain.bestChaseDist = prey.dist;
-      brain.lastProgressAt = time;
+    } else {
+      brain.targetCommitment = clamp(brain.targetCommitment + 0.045, 0, 1);
+      brain.targetSeenAt = time;
+      if (prey.dist < brain.bestChaseDist - 12) {
+        brain.bestChaseDist = prey.dist;
+        brain.lastProgressAt = time;
+      }
     }
   } else if (strategy === 'farm' && food) {
     x = food.x;
@@ -1368,6 +2211,8 @@ export function think(input: ThinkInput): Decision {
     brain.foodY = food.y;
     brain.foodScore = food.score;
     brain.foodUntil = time + AI.farm.keepSeconds;
+    rememberFarmRegion(brain, food.x, food.y, food.score, time);
+    brain.targetCommitment = Math.max(0, brain.targetCommitment - AI.planning.commitmentDecay);
     note = `farm:${food.count}`;
   } else {
     const roam = explorePoint(self, brain, personality, time, world);
@@ -1404,12 +2249,15 @@ export function think(input: ThinkInput): Decision {
   const stillHunting = strategy === 'hunt' || strategy === 'stalk';
   if (wasHunting && !stillHunting && brain.targetCellId) {
     const stalled = time - brain.lastProgressAt > AI.hunt.abandonProgress && time - brain.chaseSince > 0.7;
-    if (stalled || lethal) {
+    if (stalled || lethal || (prey?.successProbability ?? 1) < AI.planning.noWinProbability) {
       abandoned = true;
       brain.abandonOwner = brain.targetOwnerId;
       brain.abandonUntil = time + AI.memory.abandonSeconds;
       brain.lessons.chase = Math.max(0.6, brain.lessons.chase * 0.98);
+      brain.risk = Math.max(0.38, brain.risk - AI.planning.outcomeRiskStep);
+      brain.recentFailedTargets.push({ ownerId: brain.targetOwnerId, at: time, value: brain.targetScore });
     }
+    brain.targetCommitment = Math.max(0, brain.targetCommitment - 0.34);
     brain.targetCellId = 0;
   }
 
@@ -1428,6 +2276,9 @@ export function think(input: ThinkInput): Decision {
       splitLesson: brain.lessons.split,
       world,
       cooldownReady: true,
+      successProbability: prey.successProbability,
+      competitorRisk: prey.competitorRisk,
+      escapeQuality: prey.escapeQuality,
     });
     split = verdict.yes;
     splitRisky = verdict.risky;
@@ -1443,7 +2294,7 @@ export function think(input: ThinkInput): Decision {
 
   x = clamp(Number.isFinite(x) ? x : self.x, 28, world - 28);
   y = clamp(Number.isFinite(y) ? y : self.y, 28, world - 28);
-  const urgent = panic || lethal || strategy === 'flee';
+  const urgent = panic || lethal || strategy === 'flee' || situationResult.situation === 'TRAPPED';
   const lod = input.focusDist > AI.performance.farDistance ? AI.performance.lodFactor : 1;
   let interval = (AI.performance.thinkMin + input.random() * AI.performance.thinkJitter) * lod * personality.think;
   if (urgent) interval = Math.min(interval, 0.08);
@@ -1472,5 +2323,13 @@ export function think(input: ThinkInput): Decision {
     baited: strategy === 'bait',
     oscillated: committed.oscillated,
     threatId: active?.id ?? 0,
+    situation: situationResult.situation,
+    confidence: clamp(situationResult.confidence * (0.78 + brain.strategyConfidence * 0.22), 0, 1),
+    targetId: prey?.id ?? 0,
+    timeToIntercept: prey?.timeToIntercept ?? Infinity,
+    huntProbability: prey?.successProbability ?? 0,
+    escapeQuality: escape.quality,
+    crowding: crowdingLevel,
+    opportunity: opportunityLevel,
   };
 }

@@ -217,7 +217,7 @@ export default function App() {
       if (showDebug && now - debugAt > 500) {
         setDiagnostics(engine.diagnostics());
         const report = engine.aiReport();
-        setAiLine(`ai farm=${Math.round(report.stateShare.farm * 100)}% hunt=${Math.round(report.stateShare.hunt * 100)}% flee=${Math.round(report.stateShare.flee * 100)}% deaths=${report.deaths} avoidable=${report.avoidableDeaths} osc=${report.oscillations}`);
+        setAiLine(`ai farm=${Math.round(report.stateShare.farm * 100)}% hunt=${Math.round(report.stateShare.hunt * 100)}% flee=${Math.round(report.stateShare.flee * 100)}% deaths=${report.deaths} avoidable=${report.avoidableDeaths} osc=${report.oscillations} q=${Math.round(report.decisionQuality * 100)}%`);
         debugAt = now;
       }
       animation = requestAnimationFrame(frame);
@@ -450,7 +450,21 @@ function IconButton({ icon, title, onClick }: { icon: IconName; title: string; o
 
 function DebugOverlay({ fps, diagnostics, violations, aiLine }: {
   fps: number;
-  diagnostics: { time: number; cells: number; food: number; ejected: number; viruses: number; particles: number; floaters: number; zoom: number };
+  diagnostics: {
+    time: number;
+    cells: number;
+    food: number;
+    ejected: number;
+    viruses: number;
+    particles: number;
+    floaters: number;
+    zoom: number;
+    aiTimeMs: number;
+    aiDecisions: number;
+    aiAverageMs: number;
+    aiSlowestMs: number;
+    stepAverageMs: number;
+  };
   violations: number;
   aiLine: string;
 }) {
@@ -464,6 +478,9 @@ function DebugOverlay({ fps, diagnostics, violations, aiLine }: {
       <span>virus={diagnostics.viruses}</span>
       <span>fx={diagnostics.particles + diagnostics.floaters}</span>
       <span>zoom={diagnostics.zoom.toFixed(2)}</span>
+      <span>ai={diagnostics.aiAverageMs.toFixed(2)}ms ({diagnostics.aiDecisions})</span>
+      <span>step={diagnostics.stepAverageMs.toFixed(2)}ms</span>
+      <span className={diagnostics.aiSlowestMs > 8 ? 'debug-bad' : 'debug-ok'}>aiMax={diagnostics.aiSlowestMs.toFixed(1)}ms</span>
       <span className={violations ? 'debug-bad' : 'debug-ok'}>invariants={violations}</span>
       {aiLine && <span>{aiLine}</span>}
     </div>
