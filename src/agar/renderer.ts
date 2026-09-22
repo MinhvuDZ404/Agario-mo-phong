@@ -286,8 +286,96 @@ export function renderArena(ctx: CanvasRenderingContext2D, engine: AgarEngine, w
     ctx.fillStyle = floater.color;
     ctx.fillText(floater.text, floater.x, floater.y);
   }
+  if (engine.aiDebug) drawAiDebug(ctx, engine);
   ctx.globalAlpha = 1;
   ctx.restore();
+  if (engine.phase === 'playing') drawBorderWarning(ctx, engine, w, h);
+}
+
+const STRATEGY_COLOR: Record<string, string> = {
+  flee: '#e85d4c',
+  bait: '#e6b15c',
+  hunt: '#e38b3a',
+  stalk: '#d4a017',
+  farm: '#6aaa62',
+  explore: '#6aa4d8',
+  recover: '#b08ad4',
+  reposition: '#c9845a',
+};
+
+function drawAiDebug(ctx: CanvasRenderingContext2D, engine: AgarEngine) {
+  const marks = engine.aiDebugMarks();
+  ctx.save();
+  ctx.lineWidth = 1.25;
+  ctx.font = '600 11px "Nunito Sans", Arial, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  for (const mark of marks) {
+    const color = STRATEGY_COLOR[mark.strategy] ?? '#888';
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.35;
+    ctx.beginPath();
+    ctx.arc(mark.x, mark.y, Math.min(mark.perception, 420), 0, TAU);
+    ctx.stroke();
+    ctx.globalAlpha = 0.8;
+    ctx.beginPath();
+    ctx.moveTo(mark.x, mark.y);
+    ctx.lineTo(mark.tx, mark.ty);
+    ctx.stroke();
+    ctx.globalAlpha = 0.92;
+    ctx.fillStyle = color;
+    ctx.fillText(mark.note, mark.x, mark.y - 14);
+  }
+  ctx.restore();
+}
+
+function drawBorderWarning(ctx: CanvasRenderingContext2D, engine: AgarEngine, w: number, h: number) {
+  if (!engine.player.cells.length) return;
+  let x = 0;
+  let y = 0;
+  let mass = 0;
+  for (const cell of engine.player.cells) {
+    x += cell.x * cell.mass;
+    y += cell.y * cell.mass;
+    mass += cell.mass;
+  }
+  if (mass <= 0) return;
+  x /= mass;
+  y /= mass;
+  const margin = 420;
+  const fade = (dist: number) => dist >= margin ? 0 : (1 - dist / margin) * 0.22;
+  const paint = (alpha: number, grad: CanvasGradient) => {
+    if (alpha <= 0) return;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, w, h);
+    ctx.restore();
+  };
+  if (x < margin) {
+    const grad = ctx.createLinearGradient(0, 0, Math.min(170, w * 0.2), 0);
+    grad.addColorStop(0, 'rgba(196, 64, 52, 1)');
+    grad.addColorStop(1, 'rgba(196, 64, 52, 0)');
+    paint(fade(x), grad);
+  }
+  if (WORLD_SIZE - x < margin) {
+    const grad = ctx.createLinearGradient(w, 0, w - Math.min(170, w * 0.2), 0);
+    grad.addColorStop(0, 'rgba(196, 64, 52, 1)');
+    grad.addColorStop(1, 'rgba(196, 64, 52, 0)');
+    paint(fade(WORLD_SIZE - x), grad);
+  }
+  if (y < margin) {
+    const grad = ctx.createLinearGradient(0, 0, 0, Math.min(140, h * 0.18));
+    grad.addColorStop(0, 'rgba(196, 64, 52, 1)');
+    grad.addColorStop(1, 'rgba(196, 64, 52, 0)');
+    paint(fade(y), grad);
+  }
+  if (WORLD_SIZE - y < margin) {
+    const grad = ctx.createLinearGradient(0, h, 0, h - Math.min(140, h * 0.18));
+    grad.addColorStop(0, 'rgba(196, 64, 52, 1)');
+    grad.addColorStop(1, 'rgba(196, 64, 52, 0)');
+    paint(fade(WORLD_SIZE - y), grad);
+  }
 }
 
 export function renderMinimap(ctx: CanvasRenderingContext2D, engine: AgarEngine, size: number, dark: boolean) {
@@ -297,6 +385,12 @@ export function renderMinimap(ctx: CanvasRenderingContext2D, engine: AgarEngine,
   ctx.strokeStyle = dark ? '#3a414a' : '#ebeeeb'; ctx.lineWidth = 1;
   for (let i = 1; i < 5; i++) {
     ctx.beginPath(); ctx.moveTo(i / 5 * size, 0); ctx.lineTo(i / 5 * size, size); ctx.moveTo(0, i / 5 * size); ctx.lineTo(size, i / 5 * size); ctx.stroke();
+  }
+  ctx.fillStyle = '#7dae62';
+  ctx.globalAlpha = 0.85;
+  for (const virus of engine.viruses) {
+    circle(ctx, virus.x / WORLD_SIZE * size, virus.y / WORLD_SIZE * size, virus.mother ? 2.5 : 1.7);
+    ctx.fill();
   }
   for (const owner of engine.owners) {
     for (const cell of owner.cells) {

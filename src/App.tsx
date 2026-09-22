@@ -46,6 +46,7 @@ export default function App() {
   const [debug] = useState(() => {
     try { return new URLSearchParams(window.location.search).has('debug'); } catch { return false; }
   });
+  const [aiLine, setAiLine] = useState('');
   const [diagnostics, setDiagnostics] = useState(() => engine.diagnostics());
   const [fps, setFps] = useState(0);
   const [popup, setPopup] = useState<Popup>(null);
@@ -176,6 +177,7 @@ export default function App() {
     let fpsAt = previous;
     let debugAt = 0;
     const showDebug = new URLSearchParams(window.location.search).has('debug');
+    engine.aiDebug = showDebug;
     const media = window.matchMedia('(prefers-reduced-motion: reduce)');
     const resize = () => {
       const bounds = canvas.getBoundingClientRect();
@@ -214,6 +216,8 @@ export default function App() {
       }
       if (showDebug && now - debugAt > 500) {
         setDiagnostics(engine.diagnostics());
+        const report = engine.aiReport();
+        setAiLine(`ai farm=${Math.round(report.stateShare.farm * 100)}% hunt=${Math.round(report.stateShare.hunt * 100)}% flee=${Math.round(report.stateShare.flee * 100)}% deaths=${report.deaths} avoidable=${report.avoidableDeaths} osc=${report.oscillations}`);
         debugAt = now;
       }
       animation = requestAnimationFrame(frame);
@@ -401,7 +405,7 @@ export default function App() {
 
       {touch && playing && <div className="touch-joystick" style={{ left: touch.x, top: touch.y }}><span style={{ transform: `translate(${touch.dx}px, ${touch.dy}px)` }} /></div>}
       {toast && <div className="toast-message" role="status"><Icon name="info" size={17} />{toast}</div>}
-      {debug && <DebugOverlay fps={fps} diagnostics={diagnostics} violations={engine.validateInvariants().length} />}
+      {debug && <DebugOverlay fps={fps} diagnostics={diagnostics} violations={engine.validateInvariants().length} aiLine={aiLine} />}
 
       {snapshot.phase === 'ended' && !popup && <div className="result-backdrop"><section className="result-panel" aria-labelledby="result-title"><div className="result-bubbles" aria-hidden="true"><i /><i /><i /></div><span className="eyebrow">MỖI KẾT THÚC LÀ MỘT KHỞI ĐẦU</span><h2 id="result-title">Một vòng nữa nhé?</h2><p><strong>{snapshot.stats.eatenBy || 'Một tế bào lớn'}</strong> đã nuốt bạn. Lần sau sẽ khác!</p><div className="result-score"><span>KHỐI LƯỢNG CAO NHẤT</span><strong>{number(snapshot.stats.peak)}</strong><small>{snapshot.stats.peak >= record ? 'Một kỷ lục đáng tự hào!' : `Kỷ lục của bạn: ${number(record)}`}</small></div><div className="result-stats"><div><strong>{duration(snapshot.stats.seconds)}</strong><span>Sống sót</span></div><div><strong>{number(snapshot.stats.food)}</strong><span>Hạt đã ăn</span></div><div><strong>{snapshot.stats.cells}</strong><span>Tế bào đã nuốt</span></div></div><button className="primary-button" onClick={() => play()}><Icon name="restart" size={19} />Chơi lại</button><button className="secondary-button" onClick={returnToLobby}><Icon name="home" size={17} />Về sảnh</button></section></div>}
 
@@ -444,10 +448,11 @@ function IconButton({ icon, title, onClick }: { icon: IconName; title: string; o
   return <button className="icon-button" title={title} aria-label={title} onClick={onClick}><Icon name={icon} size={19} /></button>;
 }
 
-function DebugOverlay({ fps, diagnostics, violations }: {
+function DebugOverlay({ fps, diagnostics, violations, aiLine }: {
   fps: number;
   diagnostics: { time: number; cells: number; food: number; ejected: number; viruses: number; particles: number; floaters: number; zoom: number };
   violations: number;
+  aiLine: string;
 }) {
   return (
     <div className="debug-overlay" aria-hidden="true">
@@ -460,6 +465,7 @@ function DebugOverlay({ fps, diagnostics, violations }: {
       <span>fx={diagnostics.particles + diagnostics.floaters}</span>
       <span>zoom={diagnostics.zoom.toFixed(2)}</span>
       <span className={violations ? 'debug-bad' : 'debug-ok'}>invariants={violations}</span>
+      {aiLine && <span>{aiLine}</span>}
     </div>
   );
 }

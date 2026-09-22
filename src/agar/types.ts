@@ -4,7 +4,7 @@ export type GameMode = 'ffa' | 'teams' | 'experimental';
 export type GamePhase = 'lobby' | 'playing' | 'spectating' | 'ended';
 export type SkinId = 'classic' | 'earth' | 'melon' | 'smile' | 'planet' | '8ball' | 'sunset' | 'checker';
 
-/** AI personality archetype — data-driven behavior weights live in the engine. */
+/** AI personality archetype — weights live in config, decisions in `ai.ts`. */
 export type AiArchetype =
   | 'hunter'
   | 'opportunist'
@@ -15,6 +15,17 @@ export type AiArchetype =
   | 'survivor'
   | 'giant'
   | 'splitter';
+
+/** What a bot is trying to do right now. Physics does not read this. */
+export type AiStrategy =
+  | 'farm'
+  | 'explore'
+  | 'hunt'
+  | 'stalk'
+  | 'flee'
+  | 'bait'
+  | 'recover'
+  | 'reposition';
 
 export interface Preferences {
   dark: boolean;
