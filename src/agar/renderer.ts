@@ -105,19 +105,29 @@ export function paintSkin(ctx: CanvasRenderingContext2D, radius: number, skin: S
   ctx.restore();
 }
 
-export function drawCell(ctx: CanvasRenderingContext2D, x: number, y: number, radius: number, color: string, name: string, time: number, skin: SkinId = 'classic', mass?: number, quality = true, player = false) {
+export function drawCell(ctx: CanvasRenderingContext2D, x: number, y: number, radius: number, color: string, name: string, time: number, skin: SkinId = 'classic', mass?: number, quality = true, player = false, pulse = 0) {
+  const displayRadius = radius * (1 + Math.max(0, Math.min(1, pulse)) * 0.07);
   ctx.save();
   ctx.translate(x, y);
-  cellPath(ctx, radius, time, x * 0.1, quality);
+  if (player) {
+    ctx.save();
+    ctx.globalAlpha = 0.16;
+    circle(ctx, 0, 0, displayRadius + 7);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 5;
+    ctx.stroke();
+    ctx.restore();
+  }
+  cellPath(ctx, displayRadius, time, x * 0.1, quality);
   ctx.fillStyle = color;
   ctx.fill();
-  if (skin !== 'classic') paintSkin(ctx, radius - 1, skin, color, time);
-  cellPath(ctx, radius, time, x * 0.1, quality);
+  if (skin !== 'classic') paintSkin(ctx, displayRadius - 1, skin, color, time);
+  cellPath(ctx, displayRadius, time, x * 0.1, quality);
   ctx.strokeStyle = shade(skin === 'classic' ? color : skin === '8ball' ? '#42464e' : color, 0.88);
-  ctx.lineWidth = Math.max(2, Math.min(5, radius * 0.052));
+  ctx.lineWidth = Math.max(2, Math.min(5, displayRadius * 0.052));
   ctx.stroke();
   if (name) {
-    const fontSize = Math.max(12, Math.min(radius * 0.48, radius * 1.6 / Math.max(2, name.length) * 1.45));
+    const fontSize = Math.max(12, Math.min(displayRadius * 0.48, displayRadius * 1.6 / Math.max(2, name.length) * 1.45));
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.font = `600 ${fontSize}px "Nunito Sans", Arial, sans-serif`;
@@ -132,12 +142,12 @@ export function drawCell(ctx: CanvasRenderingContext2D, x: number, y: number, ra
       ctx.fillText(String(Math.round(mass)), 0, fontSize * 0.75);
     }
   } else if (mass) {
-    ctx.fillStyle = 'white'; ctx.font = `600 ${Math.max(11, radius * 0.25)}px Arial`;
+    ctx.fillStyle = 'white'; ctx.font = `600 ${Math.max(11, displayRadius * 0.25)}px Arial`;
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(String(Math.round(mass)), 0, 0);
   }
   if (player) {
     ctx.fillStyle = 'rgba(255,255,255,.8)';
-    circle(ctx, 0, -radius * 0.68, Math.max(2, radius * 0.035)); ctx.fill();
+    circle(ctx, 0, -displayRadius * 0.68, Math.max(2, displayRadius * 0.035)); ctx.fill();
   }
   ctx.restore();
 }
@@ -229,7 +239,8 @@ export function renderArena(ctx: CanvasRenderingContext2D, engine: AgarEngine, w
   ctx.strokeRect(0, 0, WORLD_SIZE, WORLD_SIZE);
   for (const food of engine.food) {
     if (!visible(food.x, food.y)) continue;
-    circle(ctx, food.x, food.y, food.radius);
+    const shimmer = preferences.quality ? 1 + Math.sin(engine.visualTime * 3 + food.id * 1.7) * 0.08 : 1;
+    circle(ctx, food.x, food.y, food.radius * shimmer);
     ctx.fillStyle = food.color;
     ctx.fill();
   }
@@ -245,7 +256,7 @@ export function renderArena(ctx: CanvasRenderingContext2D, engine: AgarEngine, w
     const owner = engine.owners[cell.owner];
     const protectedCell = owner.protectedUntil > engine.time;
     if (protectedCell) ctx.globalAlpha = 0.8;
-    drawCell(ctx, cell.x, cell.y, cell.radius, owner.color, preferences.names ? owner.name : '', engine.visualTime, owner.skin, preferences.mass ? cell.mass : undefined, preferences.quality, owner.id === 0);
+    drawCell(ctx, cell.x, cell.y, cell.radius, owner.color, preferences.names ? owner.name : '', engine.visualTime, owner.skin, preferences.mass ? cell.mass : undefined, preferences.quality, owner.id === 0, cell.pulse);
     ctx.globalAlpha = 1;
     if (owner.id === 0 && protectedCell) {
       ctx.strokeStyle = 'rgba(238,123,88,.5)';
@@ -262,6 +273,20 @@ export function renderArena(ctx: CanvasRenderingContext2D, engine: AgarEngine, w
     }
     ctx.globalAlpha = 1;
   }
+  for (const floater of engine.floaters) {
+    if (!visible(floater.x, floater.y, 20)) continue;
+    const progress = Math.max(0, floater.life / floater.ttl);
+    ctx.globalAlpha = Math.min(1, progress * 1.6);
+    ctx.font = '700 15px "Nunito Sans", Arial, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(0,0,0,.25)';
+    ctx.strokeText(floater.text, floater.x, floater.y);
+    ctx.fillStyle = floater.color;
+    ctx.fillText(floater.text, floater.x, floater.y);
+  }
+  ctx.globalAlpha = 1;
   ctx.restore();
 }
 

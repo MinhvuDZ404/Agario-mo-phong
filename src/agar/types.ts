@@ -1,6 +1,20 @@
+import { BALANCE } from './config';
+
 export type GameMode = 'ffa' | 'teams' | 'experimental';
 export type GamePhase = 'lobby' | 'playing' | 'spectating' | 'ended';
 export type SkinId = 'classic' | 'earth' | 'melon' | 'smile' | 'planet' | '8ball' | 'sunset' | 'checker';
+
+/** AI personality archetype — data-driven behavior weights live in the engine. */
+export type AiArchetype =
+  | 'hunter'
+  | 'opportunist'
+  | 'coward'
+  | 'collector'
+  | 'wanderer'
+  | 'ambusher'
+  | 'survivor'
+  | 'giant'
+  | 'splitter';
 
 export interface Preferences {
   dark: boolean;
@@ -17,6 +31,9 @@ export interface Cell {
   owner: number;
   x: number;
   y: number;
+  /** Previous position, used to estimate velocity for AI interception. */
+  lx: number;
+  ly: number;
   mass: number;
   radius: number;
   vx: number;
@@ -24,6 +41,8 @@ export interface Cell {
   born: number;
   mergeAt: number;
   alive: boolean;
+  /** Visual-only eat pulse, 1 on eat and decaying to 0. Never affects physics. */
+  pulse: number;
 }
 
 export interface Organism {
@@ -32,6 +51,7 @@ export interface Organism {
   color: string;
   skin: SkinId;
   team: number;
+  archetype: AiArchetype;
   cells: Cell[];
   targetX: number;
   targetY: number;
@@ -79,6 +99,16 @@ export interface Particle {
   life: number;
 }
 
+/** Floating combat text ("+12"). Visual only. */
+export interface Floater {
+  x: number;
+  y: number;
+  text: string;
+  color: string;
+  life: number;
+  ttl: number;
+}
+
 export interface Leader {
   id: number;
   name: string;
@@ -91,6 +121,7 @@ export interface RunStats {
   peak: number;
   food: number;
   cells: number;
+  splitEats: number;
   seconds: number;
   bestRank: number;
   eatenBy: string;
@@ -123,6 +154,8 @@ export const DEFAULT_PREFERENCES: Preferences = {
 export const CELL_COLORS = ['#ee7b58', '#8b73d6', '#ed799a', '#64b5e6', '#8fc960', '#edb34b', '#55bcb0', '#a080d7'];
 export const TEAM_COLORS = ['#ea7976', '#6da5df', '#81bf73'];
 export const FOOD_COLORS = ['#ec9bb5', '#b4a1df', '#8dc7e9', '#a9cf8c', '#eac881', '#8dcebd', '#e5a08b'];
-export const WORLD_SIZE = 4800;
-export const BOT_COUNT = 48;
-export const massRadius = (mass: number) => Math.sqrt(mass) * 5;
+/** @deprecated Import from `./config` BALANCE instead. Kept for backwards compatibility. */
+export const WORLD_SIZE = BALANCE.worldSize;
+/** @deprecated Import from `./config` BALANCE instead. Kept for backwards compatibility. */
+export const BOT_COUNT = BALANCE.botCount;
+export { massRadius } from './config';
