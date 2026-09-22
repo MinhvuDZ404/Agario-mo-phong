@@ -12,6 +12,10 @@ const __dirname = path.dirname(__filename);
 export default defineConfig({
   base: "./",
   plugins: [react(), tailwindcss(), viteSingleFile()],
+  // Dev/preview servers must accept proxied preview hosts (production is a
+  // static file, so this has no effect on the deployed game).
+  server: { host: "0.0.0.0", allowedHosts: true },
+  preview: { host: "0.0.0.0", allowedHosts: true },
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "src"),

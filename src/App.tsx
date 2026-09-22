@@ -3,7 +3,11 @@ import { AgarEngine } from './agar/engine';
 import { Icon, type IconName } from './agar/Icon';
 import { drawCell, renderArena, renderMinimap } from './agar/renderer';
 import { arenaSound } from './agar/sound';
-import { CELL_COLORS, DEFAULT_PREFERENCES, TEAM_COLORS, type ArenaSnapshot, type GameMode, type Preferences, type SkinId } from './agar/types';
+import { CELL_COLORS, TEAM_COLORS, type ArenaSnapshot, type GameMode, type Preferences, type SkinId } from './agar/types';
+import { BALANCE } from './agar/config';
+import {
+  ACHIEVEMENTS, SAVE_VERSION, earnedAchievements, loadSave, persistSave, sanitizeNickname, type BestStats,
+} from './agar/storage';
 
 type Popup = 'settings' | 'help' | 'skins' | 'about' | 'pause' | null;
 const SKINS: { id: SkinId; name: string; color: string }[] = [
@@ -17,26 +21,6 @@ const SKINS: { id: SkinId; name: string; color: string }[] = [
   { id: 'checker', name: 'Ô bàn cờ', color: '#a69ccc' },
 ];
 const MODE_LABELS: Record<GameMode, string> = { ffa: 'Tự do (FFA)', teams: 'Đồng đội', experimental: 'Thử nghiệm' };
-const STORAGE_KEY = 'agar-community-v2';
-
-function readStorage() {
-  try {
-    const value = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
-    return value && typeof value === 'object' ? value as Record<string, unknown> : {};
-  } catch { return {}; }
-}
-
-function savedPreferences(): Preferences {
-  const saved = readStorage().preferences;
-  const preferences = { ...DEFAULT_PREFERENCES };
-  if (saved && typeof saved === 'object') {
-    for (const key of Object.keys(preferences) as (keyof Preferences)[]) {
-      const value = (saved as Record<string, unknown>)[key];
-      if (typeof value === 'boolean') preferences[key] = value;
-    }
-  }
-  return preferences;
-}
 
 function number(value: number) { return Math.round(value).toLocaleString('vi-VN'); }
 function duration(seconds: number) {
@@ -45,17 +29,25 @@ function duration(seconds: number) {
 
 export default function App() {
   const [engine] = useState(() => new AgarEngine());
+  const [initialSave] = useState(loadSave);
   const [snapshot, setSnapshot] = useState<ArenaSnapshot>(() => engine.snapshot());
-  const [preferences, setPreferences] = useState<Preferences>(savedPreferences);
+  const [preferences, setPreferences] = useState<Preferences>(initialSave.preferences);
   const preferencesRef = useRef(preferences);
-  const [nickname, setNickname] = useState(() => typeof readStorage().nickname === 'string' ? String(readStorage().nickname).slice(0, 18) : '');
-  const [mode, setMode] = useState<GameMode>('ffa');
-  const [skin, setSkin] = useState<SkinId>(() => SKINS.find(item => item.id === readStorage().skin)?.id || 'classic');
-  const [color, setColor] = useState(() => CELL_COLORS.includes(String(readStorage().color)) ? String(readStorage().color) : CELL_COLORS[0]);
-  const [record, setRecord] = useState(() => {
-    const value = Number(readStorage().record);
-    return Number.isFinite(value) ? Math.max(0, value) : 0;
+  const [nickname, setNickname] = useState(initialSave.nickname);
+  const [mode, setMode] = useState<GameMode>(initialSave.mode);
+  const [skin, setSkin] = useState<SkinId>(initialSave.skin);
+  const [color, setColor] = useState(initialSave.color);
+  const [record, setRecord] = useState(initialSave.record);
+  const [volume, setVolume] = useState(initialSave.volume);
+  const [achievements, setAchievements] = useState<string[]>(initialSave.achievements);
+  const achievementsRef = useRef(achievements);
+  const [best, setBest] = useState<BestStats>(initialSave.best);
+  const countedRun = useRef('');
+  const [debug] = useState(() => {
+    try { return new URLSearchParams(window.location.search).has('debug'); } catch { return false; }
   });
+  const [diagnostics, setDiagnostics] = useState(() => engine.diagnostics());
+  const [fps, setFps] = useState(0);
   const [popup, setPopup] = useState<Popup>(null);
   const popupRef = useRef<Popup>(popup);
   const [toast, setToast] = useState('');
@@ -79,6 +71,7 @@ export default function App() {
   }, []);
 
   const openPopup = useCallback((next: Popup) => {
+    if (next) arenaSound.play('click');
     popupRef.current = next;
     setPopup(next);
     engine.keys.clear();
@@ -109,7 +102,9 @@ export default function App() {
 
   const split = useCallback(() => {
     if (!engine.split() && engine.phase === 'playing' && !engine.paused) {
-      notify(engine.player.cells.length >= 16 ? 'Bạn đã có tối đa 16 tế bào.' : 'Cần ít nhất 40 khối lượng để tách tế bào.');
+      notify(engine.player.cells.length >= BALANCE.maxFragments
+        ? `Bạn đã có tối đa ${BALANCE.maxFragments} tế bào.`
+        : `Cần ít nhất ${BALANCE.minSplitMass} khối lượng để tách tế bào.`);
     }
     setSnapshot(engine.snapshot());
   }, [engine, notify]);
@@ -126,13 +121,45 @@ export default function App() {
 
   useEffect(() => {
     preferencesRef.current = preferences;
+    achievementsRef.current = achievements;
     arenaSound.enabled = preferences.sound;
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ preferences, nickname, skin, color, record })); } catch { /* Private browsers may disallow storage. */ }
-  }, [preferences, nickname, skin, color, record]);
+    arenaSound.setVolume(volume);
+    persistSave({
+      version: SAVE_VERSION, nickname: sanitizeNickname(nickname), mode, skin, color,
+      record, volume, preferences, achievements, best,
+    });
+  }, [preferences, nickname, mode, skin, color, record, volume, achievements, best]);
 
   useEffect(() => {
-    if ((snapshot.phase === 'playing' || snapshot.phase === 'ended') && snapshot.stats.peak > record) setRecord(snapshot.stats.peak);
-  }, [snapshot.stats.peak, snapshot.phase, record]);
+    if (snapshot.phase !== 'playing' && snapshot.phase !== 'ended') return;
+    const stats = snapshot.stats;
+    if (stats.peak > record) setRecord(stats.peak);
+    const fresh = earnedAchievements(stats, achievementsRef.current);
+    if (fresh.length) {
+      const next = [...achievementsRef.current, ...fresh];
+      achievementsRef.current = next;
+      setAchievements(next);
+      const meta = ACHIEVEMENTS.find(entry => entry.id === fresh[0]);
+      if (meta) {
+        notify(`Thành tựu: ${meta.name} — ${meta.hint}`);
+        arenaSound.play('achievement');
+      }
+    }
+    if (snapshot.phase === 'ended') {
+      const key = `${Math.round(stats.seconds)}-${stats.peak}-${stats.food}-${stats.cells}`;
+      if (countedRun.current !== key) {
+        countedRun.current = key;
+        setBest(prev => ({
+          bestMass: Math.max(prev.bestMass, stats.peak),
+          bestRank: prev.bestRank > 0 && stats.bestRank > 0 ? Math.min(prev.bestRank, stats.bestRank) : Math.max(prev.bestRank, stats.bestRank),
+          mostCells: Math.max(prev.mostCells, stats.cells),
+          longestRun: Math.max(prev.longestRun, Math.round(stats.seconds)),
+          totalEaten: prev.totalEaten + stats.cells,
+          gamesPlayed: prev.gamesPlayed + 1,
+        }));
+      }
+    }
+  }, [snapshot.stats, snapshot.phase, record, notify]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -145,6 +172,10 @@ export default function App() {
     let animation = 0;
     let previous = performance.now();
     let lastSnapshot = 0;
+    let frames = 0;
+    let fpsAt = previous;
+    let debugAt = 0;
+    const showDebug = new URLSearchParams(window.location.search).has('debug');
     const media = window.matchMedia('(prefers-reduced-motion: reduce)');
     const resize = () => {
       const bounds = canvas.getBoundingClientRect();
@@ -160,11 +191,17 @@ export default function App() {
     observer.observe(canvas);
     resize();
     const frame = (now: number) => {
-      const delta = Math.min(0.04, (now - previous) / 1000);
+      const delta = Math.min(BALANCE.appFrameDt, (now - previous) / 1000);
       previous = now;
       engine.update(delta);
       ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
       renderArena(ctx, engine, width, height, preferencesRef.current, media.matches);
+      frames++;
+      if (now - fpsAt >= 500) {
+        if (showDebug) setFps(Math.round(frames * 1000 / (now - fpsAt)));
+        frames = 0;
+        fpsAt = now;
+      }
       if (now - lastSnapshot > 120) {
         setSnapshot(engine.snapshot());
         const mini = miniRef.current;
@@ -174,6 +211,10 @@ export default function App() {
           renderMinimap(miniCtx, engine, 152, preferencesRef.current.dark);
         }
         lastSnapshot = now;
+      }
+      if (showDebug && now - debugAt > 500) {
+        setDiagnostics(engine.diagnostics());
+        debugAt = now;
       }
       animation = requestAnimationFrame(frame);
     };
@@ -273,7 +314,7 @@ export default function App() {
         <div className="header-brand-group">
           <button className="wordmark-small" aria-label="Agar.io, về sảnh" onClick={() => playing || spectating ? openPopup('pause') : returnToLobby()}>agar<span>.</span>io</button>
           <div className="header-divider" />
-          <span className="server-status"><i />Đấu trường cục bộ<span className="server-bots">48 bot</span></span>
+          <span className="server-status"><i />Đấu trường cục bộ<span className="server-bots">{BALANCE.botCount} bot</span></span>
         </div>
         <nav className="header-actions" aria-label="Công cụ trò chơi">
           {(playing || spectating) && <IconButton icon="pause" title="Tạm dừng" onClick={() => openPopup('pause')} />}
@@ -331,6 +372,10 @@ export default function App() {
             <span><kbd>SPACE</kbd><small>Tách đôi</small></span>
             <span><kbd>W</kbd><small>Phóng khối</small></span>
           </div>
+          <div className="achievement-strip" title={achievements.length ? ACHIEVEMENTS.filter(entry => achievements.includes(entry.id)).map(entry => entry.name).join(' · ') : 'Chơi để mở khóa thành tựu'}>
+            <Icon name="trophy" size={15} />
+            <span>{achievements.length}/{ACHIEVEMENTS.length} thành tựu{best.gamesPlayed > 0 ? ` · ${best.gamesPlayed} ván đã chơi` : ''}</span>
+          </div>
         </div>
         <div className="lobby-caption">Ăn những tế bào nhỏ hơn. Tránh những kẻ lớn hơn.</div>
       </section>}
@@ -356,6 +401,7 @@ export default function App() {
 
       {touch && playing && <div className="touch-joystick" style={{ left: touch.x, top: touch.y }}><span style={{ transform: `translate(${touch.dx}px, ${touch.dy}px)` }} /></div>}
       {toast && <div className="toast-message" role="status"><Icon name="info" size={17} />{toast}</div>}
+      {debug && <DebugOverlay fps={fps} diagnostics={diagnostics} violations={engine.validateInvariants().length} />}
 
       {snapshot.phase === 'ended' && !popup && <div className="result-backdrop"><section className="result-panel" aria-labelledby="result-title"><div className="result-bubbles" aria-hidden="true"><i /><i /><i /></div><span className="eyebrow">MỖI KẾT THÚC LÀ MỘT KHỞI ĐẦU</span><h2 id="result-title">Một vòng nữa nhé?</h2><p><strong>{snapshot.stats.eatenBy || 'Một tế bào lớn'}</strong> đã nuốt bạn. Lần sau sẽ khác!</p><div className="result-score"><span>KHỐI LƯỢNG CAO NHẤT</span><strong>{number(snapshot.stats.peak)}</strong><small>{snapshot.stats.peak >= record ? 'Một kỷ lục đáng tự hào!' : `Kỷ lục của bạn: ${number(record)}`}</small></div><div className="result-stats"><div><strong>{duration(snapshot.stats.seconds)}</strong><span>Sống sót</span></div><div><strong>{number(snapshot.stats.food)}</strong><span>Hạt đã ăn</span></div><div><strong>{snapshot.stats.cells}</strong><span>Tế bào đã nuốt</span></div></div><button className="primary-button" onClick={() => play()}><Icon name="restart" size={19} />Chơi lại</button><button className="secondary-button" onClick={returnToLobby}><Icon name="home" size={17} />Về sảnh</button></section></div>}
 
@@ -367,7 +413,7 @@ export default function App() {
         ['minimap', 'Bản đồ nhỏ', 'Nhìn toàn cảnh ở góc màn hình.', 'expand'],
         ['quality', 'Chuyển động mềm', 'Viền tế bào sống động và hiệu ứng hạt.', 'leaf'],
         ['sound', 'Âm thanh', 'Tiếng ăn hạt, tách và phóng tế bào.', 'sound'],
-      ] as [keyof Preferences, string, string, IconName][]).map(([key, label, description, icon]) => <div className="setting-row" key={key}><span className="setting-icon"><Icon name={icon} size={19} /></span><div><strong id={`setting-${key}`}>{label}</strong><small>{description}</small></div><button className={`toggle-switch ${preferences[key] ? 'is-on' : ''}`} role="switch" aria-checked={preferences[key]} aria-labelledby={`setting-${key}`} onClick={() => togglePreference(key)}><span /></button></div>)}</div><div className="modal-footnote"><Icon name="check" size={14} />Tùy chọn được tự động lưu trên thiết bị này.</div></Modal>}
+      ] as [keyof Preferences, string, string, IconName][]).map(([key, label, description, icon]) => <div className="setting-row" key={key}><span className="setting-icon"><Icon name={icon} size={19} /></span><div><strong id={`setting-${key}`}>{label}</strong><small>{description}</small></div><button className={`toggle-switch ${preferences[key] ? 'is-on' : ''}`} role="switch" aria-checked={preferences[key]} aria-labelledby={`setting-${key}`} onClick={() => togglePreference(key)}><span /></button></div>)}</div><div className="volume-row"><span className="setting-icon"><Icon name={preferences.sound ? 'sound' : 'muted'} size={19} /></span><div><strong id="setting-volume">Âm lượng</strong><small>{Math.round(volume * 100)}% — áp dụng cho mọi hiệu ứng.</small></div><input id="setting-volume" className="volume-slider" type="range" min={0} max={100} value={Math.round(volume * 100)} aria-label="Âm lượng hiệu ứng" onChange={event => { const next = Number(event.target.value) / 100; setVolume(next); arenaSound.setVolume(next); }} /></div><div className="modal-footnote"><Icon name="check" size={14} />Tùy chọn được tự động lưu trên thiết bị này.</div></Modal>}
 
       {popup === 'skins' && <Modal title="Một chút cá tính" subtitle="Chọn diện mạo cho tế bào của bạn. Tất cả đều miễn phí." icon="palette" onClose={() => openPopup(null)}><div className="skin-grid">{SKINS.map(item => <button className={`skin-option ${skin === item.id ? 'is-selected' : ''}`} key={item.id} aria-pressed={skin === item.id} onClick={() => { setSkin(item.id); if (playing) { engine.player.skin = engine.mode === 'teams' ? 'classic' : item.id; engine.player.color = engine.mode === 'teams' ? TEAM_COLORS[engine.player.team] : item.id === 'classic' ? color : item.color; } }}><CellPreview size={76} skin={item.id} color={item.id === 'classic' ? color : item.color} /><span>{item.name}</span>{skin === item.id && <span className="skin-check"><Icon name="check" size={12} /></span>}</button>)}</div><div className="color-picker"><span className="field-label">MÀU NGUYÊN BẢN</span><div>{CELL_COLORS.map(value => <button key={value} aria-label={`Chọn màu ${value}`} aria-pressed={color === value} className={color === value ? 'color-is-selected' : ''} style={{ background: value }} onClick={() => { setColor(value); setSkin('classic'); if (playing && engine.mode !== 'teams') { engine.player.skin = 'classic'; engine.player.color = value; } }}>{color === value && <Icon name="check" size={16} />}</button>)}</div></div>{playing && engine.mode === 'teams' && <p className="mode-note">Chế độ đồng đội sử dụng màu chung của đội.</p>}<button className="primary-button" onClick={() => openPopup(null)}>Đẹp rồi, chơi thôi<Icon name="arrow" size={18} /></button></Modal>}
 
@@ -396,6 +442,26 @@ export default function App() {
 
 function IconButton({ icon, title, onClick }: { icon: IconName; title: string; onClick: () => void }) {
   return <button className="icon-button" title={title} aria-label={title} onClick={onClick}><Icon name={icon} size={19} /></button>;
+}
+
+function DebugOverlay({ fps, diagnostics, violations }: {
+  fps: number;
+  diagnostics: { time: number; cells: number; food: number; ejected: number; viruses: number; particles: number; floaters: number; zoom: number };
+  violations: number;
+}) {
+  return (
+    <div className="debug-overlay" aria-hidden="true">
+      <span>FPS {fps}</span>
+      <span>t={diagnostics.time.toFixed(1)}s</span>
+      <span>cells={diagnostics.cells}</span>
+      <span>food={diagnostics.food}</span>
+      <span>eject={diagnostics.ejected}</span>
+      <span>virus={diagnostics.viruses}</span>
+      <span>fx={diagnostics.particles + diagnostics.floaters}</span>
+      <span>zoom={diagnostics.zoom.toFixed(2)}</span>
+      <span className={violations ? 'debug-bad' : 'debug-ok'}>invariants={violations}</span>
+    </div>
+  );
 }
 
 function CellPreview({ size, color, skin }: { size: number; color: string; skin: SkinId }) {
