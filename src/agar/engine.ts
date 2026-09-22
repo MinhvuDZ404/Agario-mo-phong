@@ -1,4 +1,8 @@
-import { BALANCE, cellSpeed, massRadius, mergeDelay, zoomForMass } from './config';
+import {
+  buildReport, createBrain, createTotals, onRespawn, recordDeath, recordVirusPop, think,
+  type AiMark, type AiReport, type AiTotals, type BotBrain,
+} from './ai';
+import { AI, BALANCE, cellSpeed, massRadius, mergeDelay, zoomForMass } from './config';
 import { arenaSound } from './sound';
 import {
   CELL_COLORS, FOOD_COLORS, TEAM_COLORS,
@@ -10,29 +14,6 @@ const WORLD = BALANCE.worldSize;
 const GRID_SIZE = 140;
 const NAMES = ['nova', 'moon', 'blob', 'Orbit', 'tiny', 'jelly', 'pixel', 'miso', 'cosmo', 'Boba', 'just a cell', 'Noodle', 'pluto', 'chill', 'big little', 'Mochi', 'nebula', 'peach', 'no name', 'echo', 'bloop', 'Sushi', 'coco', 'leaf', 'bubble', 'kiwi', 'hello', 'mango', 'noodle soup', 'squish', 'pudding', 'stardust', 'not food', 'panda', 'luna', 'slowly', 'taro', 'moss', 'little bean', 'daisy', 'marble', 'Cloud', 'mint', 'bonbon', 'jupiter', 'soda', 'sprout', 'wobble'];
 const ARCHETYPES: AiArchetype[] = ['hunter', 'opportunist', 'coward', 'collector', 'wanderer', 'ambusher', 'survivor', 'giant', 'splitter'];
-
-interface ArchetypeWeights {
-  chase: number;
-  flee: number;
-  food: number;
-  virusFear: number;
-  virusBait: number;
-  wander: number;
-  splitUrge: number;
-  predict: number;
-}
-
-const AI_WEIGHTS: Record<AiArchetype, ArchetypeWeights> = {
-  hunter: { chase: 1.6, flee: 0.7, food: 0.6, virusFear: 1.0, virusBait: 0.0, wander: 0.3, splitUrge: 0.5, predict: 1.0 },
-  opportunist: { chase: 1.2, flee: 1.0, food: 0.9, virusFear: 1.0, virusBait: 0.2, wander: 0.5, splitUrge: 0.35, predict: 0.7 },
-  coward: { chase: 0.4, flee: 1.8, food: 1.0, virusFear: 1.2, virusBait: 0.8, wander: 0.6, splitUrge: 0.0, predict: 0.3 },
-  collector: { chase: 0.5, flee: 1.1, food: 1.7, virusFear: 1.1, virusBait: 0.1, wander: 0.7, splitUrge: 0.05, predict: 0.2 },
-  wanderer: { chase: 0.7, flee: 0.9, food: 0.8, virusFear: 0.9, virusBait: 0.2, wander: 1.6, splitUrge: 0.1, predict: 0.3 },
-  ambusher: { chase: 1.3, flee: 0.9, food: 1.1, virusFear: 0.7, virusBait: 0.4, wander: 0.4, splitUrge: 0.6, predict: 0.8 },
-  survivor: { chase: 0.6, flee: 1.5, food: 1.2, virusFear: 1.4, virusBait: 0.5, wander: 0.5, splitUrge: 0.05, predict: 0.4 },
-  giant: { chase: 1.0, flee: 0.4, food: 1.0, virusFear: 1.6, virusBait: 0.0, wander: 0.5, splitUrge: 0.0, predict: 0.5 },
-  splitter: { chase: 1.4, flee: 0.8, food: 0.7, virusFear: 1.0, virusBait: 0.1, wander: 0.4, splitUrge: 1.4, predict: 0.9 },
-};
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 const distance = (a: { x: number; y: number }, b: { x: number; y: number }) => Math.hypot(a.x - b.x, a.y - b.y);
@@ -81,12 +62,18 @@ export class AgarEngine {
   zoomOffset = 1;
   spectateId = 1;
   stats: RunStats = this.emptyStats();
+  /** Dev-only strategy overlay. Production stays off unless `?debug=1`. */
+  aiDebug = false;
   private nextId = 1;
   private seed = 42791;
   private index = new FoodIndex();
   private ejectAt = 0;
   private rankAt = 0;
   private lastRank = 0;
+  private brains = new Map<number, BotBrain>();
+  private ownerMap = new Map<number, Organism>();
+  private aiTotals: AiTotals = createTotals();
+  private static readonly NO_MARKS: AiMark[] = [];
 
   constructor(seed = 42791) {
     this.seed = seed >>> 0;
@@ -206,6 +193,9 @@ export class AgarEngine {
     this.ejectAt = 0;
     this.rankAt = 0;
     this.lastRank = 0;
+    this.brains.clear();
+    this.aiTotals = createTotals();
+    this.seedBrains();
     this.zoomOffset = 1;
     this.player.name = name.trim().slice(0, 18) || 'Vô danh';
     this.player.skin = skin;
@@ -232,6 +222,9 @@ export class AgarEngine {
     this.particles = [];
     this.floaters = [];
     this.keys.clear();
+    this.brains.clear();
+    this.aiTotals = createTotals();
+    this.seedBrains();
     this.zoomOffset = 1;
     this.phase = 'spectating';
     this.paused = false;
@@ -291,18 +284,19 @@ export class AgarEngine {
     this.time += dt;
     if (this.phase === 'playing') this.stats.seconds += dt;
     const cells = this.owners.flatMap(owner => owner.cells).filter(cell => cell.alive);
+    this.ownerMap.clear();
+    for (const owner of this.owners) this.ownerMap.set(owner.id, owner);
     for (const owner of this.owners) {
-      if (owner.id !== 0 && !owner.cells.length && this.time >= owner.respawnAt) {
-        const spawn = this.pickSpawn();
-        owner.cells = [this.makeCell(owner.id, spawn.x, spawn.y, BALANCE.botMinMass + this.random() * 95)];
-        owner.protectedUntil = this.time + BALANCE.botProtection;
-      }
+      if (owner.id !== 0 && !owner.cells.length && this.time >= owner.respawnAt) this.respawnBot(owner);
       if (!owner.cells.length) continue;
       if (owner.id === 0) this.updatePlayerTarget();
       else if (this.time >= owner.nextDecision) this.decide(owner, cells);
+      this.steerBot(owner, dt);
       this.moveOwner(owner, dt);
       this.recombine(owner, dt);
+      if (owner.id !== 0) this.trackBot(owner, dt);
     }
+    this.sampleAi();
     this.updateEjected(dt);
     this.consumeFood();
     this.consumeCells();
@@ -322,10 +316,12 @@ export class AgarEngine {
   private pickSpawn(): { x: number; y: number } {
     let best = { x: this.coordinate(160), y: this.coordinate(160) };
     let bestScore = -Infinity;
-    for (let attempt = 0; attempt < 6; attempt++) {
+    for (let attempt = 0; attempt < 8; attempt++) {
       const x = this.coordinate(160);
       const y = this.coordinate(160);
       let score = this.random() * 20;
+      const edge = Math.min(x, y, WORLD - x, WORLD - y);
+      if (edge < 300) score -= (300 - edge) / 8;
       for (const owner of this.owners) {
         for (const cell of owner.cells) {
           const dist = Math.hypot(cell.x - x, cell.y - y);
@@ -352,130 +348,202 @@ export class AgarEngine {
     this.player.targetY = this.camera.y + y / this.camera.zoom;
   }
 
+
+  private seedBrains() {
+    for (const owner of this.owners) {
+      if (owner.id === 0 || !owner.cells.length) continue;
+      const cell = owner.cells[0];
+      this.brains.set(owner.id, createBrain(owner.id, cell.x, cell.y, this.time, owner.archetype));
+    }
+  }
+
+  private brainFor(owner: Organism): BotBrain {
+    let brain = this.brains.get(owner.id);
+    if (!brain) {
+      const cell = owner.cells[0];
+      brain = createBrain(owner.id, cell?.x ?? WORLD / 2, cell?.y ?? WORLD / 2, this.time, owner.archetype);
+      this.brains.set(owner.id, brain);
+    }
+    return brain;
+  }
+
+  private respawnBot(owner: Organism) {
+    const spawn = this.pickSpawn();
+    owner.cells = [this.makeCell(owner.id, spawn.x, spawn.y, BALANCE.botMinMass + this.random() * 95)];
+    owner.protectedUntil = this.time + BALANCE.botProtection;
+    owner.targetX = spawn.x;
+    owner.targetY = spawn.y;
+    owner.nextDecision = this.time;
+    const brain = this.brains.get(owner.id);
+    if (brain) onRespawn(brain, spawn.x, spawn.y, this.time);
+  }
+
   /**
-   * Utility AI: every think tick scores flee / chase / feed / wander options
-   * and commits to the best one. Perception is range-limited — bots never cheat
-   * with global knowledge.
+   * Strategic tick. The mind returns an aim point and optional actions;
+   * physics applies them. Perception stays local — no full-map entity list.
    */
   private decide(owner: Organism, cells: Cell[]) {
-    const weights = AI_WEIGHTS[owner.archetype];
-    const focusX = this.phase === 'spectating' ? this.camera.x : (this.player.cells[0]?.x ?? WORLD / 2);
-    const focusY = this.phase === 'spectating' ? this.camera.y : (this.player.cells[0]?.y ?? WORLD / 2);
+    const brain = this.brainFor(owner);
+    const focusX = this.phase === 'spectating' ? this.camera.x : (this.player.cells[0]?.x ?? this.camera.x);
+    const focusY = this.phase === 'spectating' ? this.camera.y : (this.player.cells[0]?.y ?? this.camera.y);
     const main = owner.cells.reduce((a, b) => a.mass > b.mass ? a : b);
-    const distToFocus = Math.hypot(main.x - focusX, main.y - focusY);
-    // Simulation LOD: distant bots think less often; nearby play stays sharp.
-    const lod = distToFocus > BALANCE.aiFarDistance ? 2.2 : 1;
-    owner.nextDecision = this.time + (BALANCE.aiThinkMin + this.random() * BALANCE.aiThinkJitter) * lod;
-
-    const perception = BALANCE.aiPerception * (owner.archetype === 'giant' ? 0.8 : 1);
-    let fleeX = 0;
-    let fleeY = 0;
-    let threat = 0;
-    let prey: Cell | null = null;
-    let preyScore = 0;
-    let hunterX = 0;
-
-    for (const other of cells) {
-      if (!other.alive || other.owner === owner.id) continue;
-      const otherOwner = this.ownerById(other.owner);
-      if (!otherOwner) continue;
-      if (this.mode === 'teams' && otherOwner.team === owner.team) continue;
-      const dist = distance(main, other);
-      if (dist > perception) continue;
-      if (other.mass > main.mass * BALANCE.aiFleeRatio && dist < other.radius + main.radius + BALANCE.aiFleeMargin) {
-        const weight = ((other.radius + 180) / Math.max(20, dist - other.radius)) * weights.flee;
-        fleeX += (main.x - other.x) / Math.max(1, dist) * weight;
-        fleeY += (main.y - other.y) / Math.max(1, dist) * weight;
-        threat += weight;
-        hunterX = other.x;
-      } else if (main.mass > other.mass * BALANCE.aiChaseRatio && otherOwner.protectedUntil < this.time) {
-        const score = (other.mass / Math.max(80, dist)) * weights.chase;
-        if (score > preyScore) { prey = other; preyScore = score; }
+    const reach = AI.perception.max;
+    const visibleCells = cells.filter(cell => {
+      if (cell.owner === owner.id) return true;
+      for (const mine of owner.cells) {
+        if (Math.abs(cell.x - mine.x) <= reach && Math.abs(cell.y - mine.y) <= reach) return true;
       }
+      return false;
+    });
+    const visibleViruses = this.viruses.filter(virus => {
+      for (const mine of owner.cells) {
+        if (Math.abs(virus.x - mine.x) <= reach && Math.abs(virus.y - mine.y) <= reach) return true;
+      }
+      return false;
+    });
+    const pelletReach = AI.performance.foodRadius + 80;
+    const visibleEjected = this.ejected.filter(mass => {
+      if (mass.mass <= 0) return false;
+      for (const mine of owner.cells) {
+        if (Math.abs(mass.x - mine.x) <= pelletReach && Math.abs(mass.y - mine.y) <= pelletReach) return true;
+      }
+      return false;
+    });
+    const decision = think({
+      time: this.time,
+      world: WORLD,
+      mode: this.mode,
+      owner,
+      cells: visibleCells,
+      viruses: visibleViruses,
+      ejected: visibleEjected,
+      foodNear: (x, y, radius) => this.index.near(x, y, radius),
+      ownerOf: id => this.ownerMap.get(id),
+      random: () => this.random(),
+      brain,
+      focusDist: Math.hypot(main.x - focusX, main.y - focusY),
+    });
+    const previous = brain.strategy;
+    if (decision.strategy !== previous) {
+      brain.since = this.time;
+      brain.switches++;
+      brain.massAtStrategy = owner.cells.reduce((sum, cell) => sum + cell.mass, 0);
+      this.aiTotals.switches++;
     }
-
-    for (const virus of this.viruses) {
-      if (main.mass < (virus.mother ? 480 : 140)) continue;
-      const dist = distance(main, virus);
-      if (dist < main.radius + virus.radius + 65) {
-        const weight = 1.6 * weights.virusFear;
-        fleeX += (main.x - virus.x) / Math.max(1, dist) * weight;
-        fleeY += (main.y - virus.y) / Math.max(1, dist) * weight;
-        threat += weight * 0.5;
-      }
+    brain.strategy = decision.strategy;
+    brain.desiredX = decision.x;
+    brain.desiredY = decision.y;
+    brain.urgent = decision.urgent;
+    brain.perception = decision.perception;
+    brain.threatScore = decision.threat;
+    brain.huntScore = decision.hunt;
+    brain.farmScore = decision.farm;
+    brain.fleeScore = decision.flee;
+    brain.lastThreat = decision.threat;
+    brain.lastWall = decision.wall;
+    brain.note = decision.note;
+    owner.nextDecision = this.time + decision.interval;
+    if (decision.split && this.splitOwner(owner, decision.angle, true)) {
+      brain.lastSplitAt = this.time;
+      brain.lastSplitRisky = decision.splitRisky;
+      brain.vulnerableUntil = this.time + 1.7;
+      brain.finishUntil = this.time + 0.9;
+      this.aiTotals.splits++;
+    } else if (decision.eject && this.time >= brain.ejectAt && this.ejectOwner(owner, decision.ejectAngle, false)) {
+      brain.ejectAt = this.time + BALANCE.ejectCooldown;
+      this.aiTotals.ejects++;
+      if (decision.ejectKind === 'feed') this.aiTotals.virusFeeds++;
     }
+    const surviving = decision.strategy === 'flee' || decision.strategy === 'bait';
+    const wasSurviving = previous === 'flee' || previous === 'bait';
+    if (surviving && !wasSurviving && decision.urgent) this.aiTotals.escapeAttempts++;
+    if (wasSurviving && !surviving && decision.threat < 0.55) this.aiTotals.escapes++;
+    const hunting = decision.strategy === 'hunt' || decision.strategy === 'stalk';
+    const wasHunting = previous === 'hunt' || previous === 'stalk';
+    if (hunting && !wasHunting) this.aiTotals.hunts++;
+    if (decision.abandoned) this.aiTotals.huntsFailed++;
+    if (decision.baited && previous !== 'bait') this.aiTotals.virusBaits++;
+    if (decision.oscillated) this.aiTotals.oscillations++;
+  }
 
-    const fleeUtility = threat;
-    const chaseUtility = prey ? preyScore * 3.2 : 0;
-
-    if (fleeUtility > chaseUtility && fleeUtility > 0.35) {
-      // Escape artists run toward a virus to force a large chaser to swerve.
-      const bait = weights.virusBait > 0.3 && main.mass < 400 && hunterX !== 0;
-      if (bait) {
-        let shield: Virus | null = null;
-        let shieldDist = 900;
-        for (const virus of this.viruses) {
-          if (virus.mother) continue;
-          const dist = distance(main, virus);
-          if (dist < shieldDist) { shield = virus; shieldDist = dist; }
-        }
-        if (shield && this.random() < weights.virusBait) {
-          owner.targetX = shield.x;
-          owner.targetY = shield.y;
-          return;
-        }
-      }
-      fleeX += (WORLD / 2 - main.x) / WORLD * (main.x < 200 || main.x > WORLD - 200 ? 2 : 0.08);
-      fleeY += (WORLD / 2 - main.y) / WORLD * (main.y < 200 || main.y > WORLD - 200 ? 2 : 0.08);
-      // Sidestep: don't flee in a straight predictable line.
-      const side = this.random() < 0.5 ? 1 : -1;
-      const length = Math.hypot(fleeX, fleeY) || 1;
-      const curve = 0.35 * side;
-      const curvedX = fleeX / length - (-fleeY / length) * curve;
-      const curvedY = fleeY / length - (fleeX / length) * curve;
-      owner.targetX = clamp(main.x + curvedX * 400, 60, WORLD - 60);
-      owner.targetY = clamp(main.y + curvedY * 400, 60, WORLD - 60);
-    } else if (prey && chaseUtility > 0.25) {
-      // Intercept with velocity prediction instead of chasing the tail.
-      const target = prey as Cell;
-      const pvx = (target.x - target.lx) * 60;
-      const pvy = (target.y - target.ly) * 60;
-      const dist = distance(main, target);
-      const lead = clamp(dist / 900, 0, 1) * weights.predict * 0.55;
-      owner.targetX = clamp(target.x + pvx * lead * 0.12, 40, WORLD - 40);
-      owner.targetY = clamp(target.y + pvy * lead * 0.12, 40, WORLD - 40);
-      const canSplit = owner.cells.length < 3 && this.time > owner.splitAt;
-      if (canSplit && main.mass > target.mass * BALANCE.aiSplitRatio && dist < main.radius + BALANCE.aiSplitRange) {
-        if (this.random() < 0.07 + weights.splitUrge * 0.09) {
-          this.splitOwner(owner, Math.atan2(target.y - main.y, target.x - main.x));
-        }
-      }
+  /** Ease the aim point so bots don't snap 180° every think. Players stay direct. */
+  private steerBot(owner: Organism, dt: number) {
+    if (owner.id === 0) return;
+    const brain = this.brains.get(owner.id);
+    if (!brain) return;
+    const rate = brain.urgent ? AI.movement.aimUrgent : AI.movement.aimRate;
+    const blend = 1 - Math.exp(-rate * dt);
+    if (!brain.aimed) {
+      brain.aimX = brain.desiredX;
+      brain.aimY = brain.desiredY;
+      brain.aimed = true;
     } else {
-      let nearest: Food | null = null;
-      let nearestDist = BALANCE.aiFoodSearch + 80;
-      for (const food of this.index.near(main.x, main.y, BALANCE.aiFoodSearch)) {
-        const d = distance(main, food);
-        if (d < nearestDist && d > 2) { nearest = food; nearestDist = d; }
-      }
-      const wantsFood = nearest && (this.random() < 0.35 + weights.food * 0.3 || weights.wander < 1.2);
-      if (wantsFood && nearest) {
-        owner.targetX = (nearest as Food).x;
-        owner.targetY = (nearest as Food).y;
-      } else if (distance(main, { x: owner.targetX, y: owner.targetY }) < 100 || this.random() < 0.06 * weights.wander) {
-        // Wanderers roam; giants hold the center; ambushers lurk near viruses.
-        if (owner.archetype === 'ambusher' && this.viruses.length && this.random() < 0.5) {
-          const virus = this.viruses[Math.floor(this.random() * this.viruses.length)];
-          owner.targetX = clamp(virus.x + (this.random() - 0.5) * 500, 60, WORLD - 60);
-          owner.targetY = clamp(virus.y + (this.random() - 0.5) * 500, 60, WORLD - 60);
-        } else if (owner.archetype === 'giant') {
-          owner.targetX = WORLD / 2 + (this.random() - 0.5) * 1400;
-          owner.targetY = WORLD / 2 + (this.random() - 0.5) * 1400;
-        } else {
-          owner.targetX = this.coordinate(200);
-          owner.targetY = this.coordinate(200);
-        }
-      }
+      brain.aimX += (brain.desiredX - brain.aimX) * blend;
+      brain.aimY += (brain.desiredY - brain.aimY) * blend;
     }
+    owner.targetX = clamp(brain.aimX, 24, WORLD - 24);
+    owner.targetY = clamp(brain.aimY, 24, WORLD - 24);
+  }
+
+  private trackBot(owner: Organism, dt: number) {
+    const brain = this.brains.get(owner.id);
+    if (!brain) return;
+    this.aiTotals.stateTime[brain.strategy] += dt;
+    const mass = owner.cells.reduce((sum, cell) => sum + cell.mass, 0);
+    if (mass > brain.peakMass) brain.peakMass = mass;
+    if (mass > this.aiTotals.maxMass) this.aiTotals.maxMass = mass;
+  }
+
+  private sampleAi() {
+    if (this.time < this.aiTotals.sampleAt) return;
+    this.aiTotals.sampleAt = this.time + 1;
+    for (const owner of this.owners) {
+      if (owner.id === 0 || !owner.cells.length) continue;
+      const mass = owner.cells.reduce((sum, cell) => sum + cell.mass, 0);
+      this.aiTotals.massSum += mass;
+      this.aiTotals.massSamples++;
+      if (mass > this.aiTotals.maxMass) this.aiTotals.maxMass = mass;
+    }
+  }
+
+  private dropOwner(owner: Organism) {
+    const hadCells = owner.cells.length > 0;
+    owner.cells = owner.cells.filter(cell => cell.alive);
+    if (hadCells && !owner.cells.length) {
+      owner.respawnAt = this.time + BALANCE.respawnDelay;
+      if (owner.id !== 0) recordDeath(this.brains.get(owner.id), this.aiTotals, this.time);
+    }
+  }
+
+  aiReport(): AiReport {
+    return buildReport(this.aiTotals, this.owners, this.brains, this.time);
+  }
+
+  aiDebugMarks(): AiMark[] {
+    if (!this.aiDebug) return AgarEngine.NO_MARKS;
+    const marks: AiMark[] = [];
+    for (const owner of this.owners) {
+      if (owner.id === 0 || !owner.cells.length) continue;
+      const brain = this.brains.get(owner.id);
+      if (!brain) continue;
+      let x = 0;
+      let y = 0;
+      let mass = 0;
+      for (const cell of owner.cells) {
+        x += cell.x * cell.mass;
+        y += cell.y * cell.mass;
+        mass += cell.mass;
+      }
+      x /= mass;
+      y /= mass;
+      if (Math.hypot(x - this.camera.x, y - this.camera.y) > 980) continue;
+      marks.push({
+        x, y, tx: brain.desiredX, ty: brain.desiredY,
+        strategy: brain.strategy, perception: brain.perception, note: brain.note,
+      });
+      if (marks.length >= 12) break;
+    }
+    return marks;
   }
 
   private moveOwner(owner: Organism, dt: number) {
@@ -494,8 +562,8 @@ export class AgarEngine {
       }
       cell.x += cell.vx * dt;
       cell.y += cell.vy * dt;
-      cell.vx *= Math.exp(-3.4 * dt);
-      cell.vy *= Math.exp(-3.4 * dt);
+      cell.vx *= Math.exp(-BALANCE.impulseDecay * dt);
+      cell.vy *= Math.exp(-BALANCE.impulseDecay * dt);
       cell.radius += (massRadius(cell.mass) - cell.radius) * Math.min(1, dt * 9);
       cell.pulse = Math.max(0, cell.pulse - dt * 3.2);
       // Effective radius can never exceed half the arena, otherwise clamping
@@ -553,10 +621,11 @@ export class AgarEngine {
     return result;
   }
 
-  private splitOwner(owner: Organism, angle: number): boolean {
+  private splitOwner(owner: Organism, angle: number, onlyLargest = false): boolean {
     const original = [...owner.cells].sort((a, b) => b.mass - a.mass);
+    const targets = onlyLargest ? original.slice(0, 1) : original;
     let didSplit = false;
-    for (const cell of original) {
+    for (const cell of targets) {
       if (owner.cells.length >= BALANCE.maxFragments) break;
       if (cell.mass < BALANCE.minSplitMass) continue;
       // Split conserves mass exactly: two halves equal the whole.
@@ -570,34 +639,39 @@ export class AgarEngine {
       owner.cells.push(newCell);
       didSplit = true;
     }
-    if (didSplit) owner.splitAt = this.time + BALANCE.splitCooldown;
+    if (didSplit) owner.splitAt = this.time + (onlyLargest ? AI.split.cooldown : BALANCE.splitCooldown);
     return didSplit;
   }
 
   eject(): boolean {
     if (this.phase !== 'playing' || this.paused || this.time < this.ejectAt) return false;
+    const didEject = this.ejectOwner(this.player, null, true);
+    this.ejectAt = this.time + BALANCE.ejectCooldown;
+    if (didEject) arenaSound.play('eject');
+    return didEject;
+  }
+
+  private ejectOwner(owner: Organism, angle: number | null, fromAll: boolean): boolean {
     let didEject = false;
-    for (const cell of this.player.cells) {
+    const cells = fromAll ? owner.cells : [...owner.cells].sort((a, b) => b.mass - a.mass).slice(0, 1);
+    for (const cell of cells) {
       if (cell.mass < BALANCE.minEjectMass) continue;
-      // Enforce the cap at insertion time so multi-fragment ejects can never
-      // overflow between the periodic trims in updateEjected().
       if (this.ejected.length >= BALANCE.maxEjected) {
         this.ejected.sort((a, b) => a.born - b.born);
         this.ejected.shift();
       }
-      const angle = Math.atan2(this.player.targetY - cell.y, this.player.targetX - cell.x);
+      const aim = angle ?? Math.atan2(owner.targetY - cell.y, owner.targetX - cell.x);
       const radius = massRadius(cell.mass);
       this.ejected.push({
         id: this.nextId++,
-        x: cell.x + Math.cos(angle) * (radius + 14), y: cell.y + Math.sin(angle) * (radius + 14),
-        vx: Math.cos(angle) * BALANCE.ejectImpulse, vy: Math.sin(angle) * BALANCE.ejectImpulse,
-        color: this.player.color, mass: BALANCE.ejectMass, radius: 9, born: this.time, owner: 0,
+        x: cell.x + Math.cos(aim) * (radius + 14), y: cell.y + Math.sin(aim) * (radius + 14),
+        vx: Math.cos(aim) * BALANCE.ejectImpulse, vy: Math.sin(aim) * BALANCE.ejectImpulse,
+        color: owner.color, mass: BALANCE.ejectMass, radius: 9, born: this.time, owner: owner.id,
       });
       cell.mass -= BALANCE.ejectCost;
       didEject = true;
+      if (!fromAll) break;
     }
-    this.ejectAt = this.time + BALANCE.ejectCooldown;
-    if (didEject) arenaSound.play('eject');
     return didEject;
   }
 
@@ -605,8 +679,8 @@ export class AgarEngine {
     for (const mass of this.ejected) {
       mass.x = clamp(mass.x + mass.vx * dt, 10, WORLD - 10);
       mass.y = clamp(mass.y + mass.vy * dt, 10, WORLD - 10);
-      mass.vx *= Math.exp(-3.5 * dt);
-      mass.vy *= Math.exp(-3.5 * dt);
+      mass.vx *= Math.exp(-BALANCE.ejectDecay * dt);
+      mass.vy *= Math.exp(-BALANCE.ejectDecay * dt);
     }
     this.ejected = this.ejected.filter(mass => this.time - mass.born < BALANCE.ejectLifetime && mass.mass > 0);
     // Hard cap so eject spam can never grow memory or collision cost unboundedly.
@@ -629,6 +703,10 @@ export class AgarEngine {
             this.stats.food++;
             this.burst(food.x, food.y, food.color, 2);
             arenaSound.play('eat');
+          } else {
+            this.aiTotals.foodEaten++;
+            const brain = this.brains.get(owner.id);
+            if (brain) brain.foodEaten++;
           }
           this.resetFood(food);
         }
@@ -672,14 +750,19 @@ export class AgarEngine {
           this.addFloater(small.x, small.y, `+${Math.round(small.mass)}`, '#ffffff');
         }
         if (small.owner === 0) this.stats.eatenBy = bigOwner.name;
+        if (big.owner !== 0) {
+          this.aiTotals.preyEaten++;
+          const brain = this.brains.get(big.owner);
+          if (brain && brain.targetCellId === small.id) {
+            this.aiTotals.huntsWon++;
+            brain.kills++;
+            brain.targetCellId = 0;
+          }
+        }
         this.burst(small.x, small.y, smallOwner.color, 7);
       }
     }
-    for (const owner of this.owners) {
-      const hadCells = owner.cells.length > 0;
-      owner.cells = owner.cells.filter(cell => cell.alive);
-      if (hadCells && !owner.cells.length) owner.respawnAt = this.time + BALANCE.respawnDelay;
-    }
+    for (const owner of this.owners) this.dropOwner(owner);
   }
 
   private updateViruses(dt: number) {
@@ -735,14 +818,13 @@ export class AgarEngine {
             consumed = true;
           }
         }
-        const hadCells = owner.cells.length > 0;
-        owner.cells = owner.cells.filter(cell => cell.alive);
-        if (hadCells && !owner.cells.length) owner.respawnAt = this.time + BALANCE.respawnDelay;
+        this.dropOwner(owner);
       }
     }
   }
 
   private explode(owner: Organism, cell: Cell, bonus: number) {
+    if (owner.id !== 0) recordVirusPop(this.brains.get(owner.id), this.aiTotals);
     cell.mass += bonus;
     const capacity = BALANCE.maxFragments + 1 - owner.cells.length;
     if (capacity < 2) {

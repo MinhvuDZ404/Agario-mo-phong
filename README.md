@@ -33,7 +33,7 @@ https://<TÊN-GITHUB>.github.io/<TÊN-REPO>/
 npm install
 npm run dev      # chế độ phát triển
 npm run build    # tạo bản production vào thư mục dist/
-npm run test     # 63 automated tests (vitest)
+npm run test     # automated tests (vitest)
 npm run check    # typecheck toàn project (tsc --noEmit)
 ```
 
@@ -60,12 +60,13 @@ npm run check    # typecheck toàn project (tsc --noEmit)
 
 - `src/App.tsx`: lobby, HUD, settings, skins, results, input, achievements, debug overlay, and browser persistence.
 - `src/agar/config.ts`: **single source of balance** — every gameplay number (mass, speed, split, merge, eject, virus, decay, AI, camera) lives here.
-- `src/agar/engine.ts`: fixed-substep simulation, utility-based bot AI with 9 personality archetypes, deterministic eating resolution, splitting, merging, viruses, scoring, spawn scoring, and invariant validation.
+- `src/agar/ai.ts`: bot mind. Perception is local, then threat, farm, hunt, flee, split, and virus choices are scored with hysteresis. Nine personalities change priorities, not speed or vision cheats. Physics still owns movement.
+- `src/agar/engine.ts`: fixed-substep simulation, deterministic eating resolution, splitting, merging, viruses, scoring, spawn scoring, and invariant validation. Bots only receive an aim point plus an optional split or eject.
 - `src/agar/renderer.ts`: procedural canvas art, skins, eat pulses, floating score text, pellet shimmer, camera, arena, and minimap.
 - `src/agar/sound.ts`: gesture-activated Web Audio effects (12 presets, master volume, throttling, node cleanup).
 - `src/agar/storage.ts`: versioned, validated localStorage saves with legacy migration, nickname sanitizer, and achievement definitions.
 - `src/index.css`: responsive layout and reduced-motion support.
-- `tests/`: 63 tests — formulas, engine behavior, structural invariants, property/fuzz tests, AI behavior, save validation, scripted full-session playtests, and a performance budget check.
+- `tests/`: formulas, engine behavior, structural invariants, property/fuzz tests, AI perception and tactics, a 60-second ecosystem probe, save validation, scripted full-session playtests, and a performance budget check.
 
 Nickname, appearance, settings, volume, achievements, and best stats are stored in localStorage (v3 schema, migrates v2 automatically). A running round is not persisted. Legacy artwork from the previous game is not loaded by this implementation.
 
@@ -74,11 +75,11 @@ Nickname, appearance, settings, volume, achievements, and best stats are stored 
 - `update(dt)` clamps wild deltas (background tabs) and runs the sim in fixed 1/60 sub-steps, so eating and collision behave the same at 30–144 FPS.
 - Split/merge/eat conserve mass exactly (decay above 180 mass is the only designed sink).
 - `engine.validateInvariants()` reports structural violations (NaN, negative mass, duplicate ids, dead cells in play, out-of-bounds entities, over-cap pools) and backs both the test suite and the debug overlay.
-- Open the game with `?debug=1` to show FPS, entity counts, camera zoom, and the live invariant-violation count.
+- Open the game with `?debug=1` to show FPS, entity counts, camera zoom, invariant violations, and nearby bot strategy vectors.
 
 ## Verification
 
 - `npm run check` — strict TypeScript, zero errors.
-- `npm run test` — 63 tests across 6 files, including 5-minute long-run stability, 100 consecutive restarts, eject/split/virus spam, extreme-mass clamping, determinism (same seed → same leaderboard), and scripted 90-second play sessions in every mode.
+- `npm run test` — including 5-minute long-run stability, 100 consecutive restarts, eject/split/virus spam, extreme-mass clamping, determinism (same seed → same leaderboard), scripted 90-second play sessions in every mode, and a 60-second bot ecosystem probe.
 - `npm run build` — single-file production bundle served from `dist/`.
 - Browser input, touch behavior, and long-running gameplay still benefit from manual testing on the target devices.

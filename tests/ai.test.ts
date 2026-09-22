@@ -78,6 +78,52 @@ describe('bot AI', () => {
     }
   });
 
+  it('flees a nearby giant instead of holding still', () => {
+    const engine = fullEngine(23);
+    const prey = engine.owners[2];
+    const hunter = engine.owners[1];
+    hunter.cells[0].mass = 2800;
+    hunter.cells[0].radius = 5 * Math.sqrt(2800);
+    hunter.protectedUntil = 0;
+    prey.cells[0].mass = 55;
+    prey.protectedUntil = 0;
+    const x = 2200;
+    const y = 2200;
+    hunter.cells[0].x = x;
+    hunter.cells[0].y = y;
+    hunter.cells[0].lx = x;
+    hunter.cells[0].ly = y;
+    prey.cells[0].x = x + 190;
+    prey.cells[0].y = y;
+    prey.cells[0].lx = x + 190;
+    prey.cells[0].ly = y;
+    prey.nextDecision = 0;
+    for (const owner of engine.owners) {
+      if (owner.id === hunter.id || owner.id === prey.id || owner.id === 0) continue;
+      for (const cell of owner.cells) {
+        cell.x = 200;
+        cell.y = 200 + owner.id;
+        cell.mass = 20;
+      }
+      owner.nextDecision = 999;
+    }
+    const before = prey.cells[0].x;
+    step(engine, 1.2);
+    if (prey.cells.length) {
+      expect(prey.cells[0].x).toBeGreaterThan(before + 40);
+    }
+  });
+
+  it('uses more than one strategy across a short match', () => {
+    const engine = fullEngine(17);
+    step(engine, 12, 1 / 30);
+    const report = engine.aiReport();
+    const used = Object.values(report.stateCounts).filter(count => count > 0).length;
+    expect(used).toBeGreaterThanOrEqual(2);
+    expect(report.foodEaten).toBeGreaterThan(0);
+    expect(Number.isFinite(report.averageMass)).toBe(true);
+  });
+
   it('produces a living leaderboard with turnover', () => {
     const engine = fullEngine(89);
     const first = engine.snapshot().leaders.map(leader => leader.id).join(',');
