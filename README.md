@@ -2,6 +2,8 @@
 
 A self-contained, Vietnamese-language browser game inspired by Agar.io. This is a community recreation, not an official Agar.io client. All opponents are local AI bots; there is no multiplayer server or account system.
 
+# link https://minhvudz404.github.io/Agario-mo-phong/
+
 ## Deploy lên GitHub Pages
 
 Repo này đã được cấu hình sẵn để host miễn phí trên GitHub Pages.
