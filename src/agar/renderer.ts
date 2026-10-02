@@ -1,10 +1,17 @@
 import type { AgarEngine } from './engine';
-import { CELL_COLORS, FOOD_COLORS, WORLD_SIZE, type Cell, type Preferences, type SkinId } from './types';
+import { CELL_COLORS, FOOD_COLORS, WORLD_SIZE, type Cell, type Food, type Preferences, type SkinId } from './types';
 
 const TAU = Math.PI * 2;
+const SHADE_CACHE = new Map<string, string>();
 const shade = (hex: string, factor: number) => {
-  const value = Number.parseInt(hex.slice(1), 16);
-  return `rgb(${Math.round((value >> 16) * factor)},${Math.round(((value >> 8) & 255) * factor)},${Math.round((value & 255) * factor)})`;
+  const key = hex + factor;
+  let cached = SHADE_CACHE.get(key);
+  if (!cached) {
+    const value = Number.parseInt(hex.slice(1), 16);
+    cached = `rgb(${Math.round((value >> 16) * factor)},${Math.round(((value >> 8) & 255) * factor)},${Math.round((value & 255) * factor)})`;
+    SHADE_CACHE.set(key, cached);
+  }
+  return cached;
 };
 
 function circle(ctx: CanvasRenderingContext2D, x: number, y: number, radius: number) {
@@ -12,16 +19,32 @@ function circle(ctx: CanvasRenderingContext2D, x: number, y: number, radius: num
   ctx.arc(x, y, Math.max(0.1, radius), 0, TAU);
 }
 
+const CELL_STEPS = 64;
+const CELL_COS = new Float32Array(CELL_STEPS + 1);
+const CELL_SIN = new Float32Array(CELL_STEPS + 1);
+const CELL_ANGLE_5 = new Float32Array(CELL_STEPS + 1);
+const CELL_ANGLE_3 = new Float32Array(CELL_STEPS + 1);
+for (let i = 0; i <= CELL_STEPS; i++) {
+  const angle = (i / CELL_STEPS) * TAU;
+  CELL_COS[i] = Math.cos(angle);
+  CELL_SIN[i] = Math.sin(angle);
+  CELL_ANGLE_5[i] = angle * 5;
+  CELL_ANGLE_3[i] = angle * 3;
+}
+
 function cellPath(ctx: CanvasRenderingContext2D, radius: number, time: number, seed: number, organic: boolean) {
   ctx.beginPath();
   if (!organic) { ctx.arc(0, 0, radius, 0, TAU); return; }
-  const steps = 64;
-  for (let i = 0; i <= steps; i++) {
-    const angle = i / steps * TAU;
-    const offset = Math.sin(angle * 5 + time * 0.6 + seed) * 0.5 + Math.sin(angle * 3 - time * 0.8 + seed) * 0.6;
-    const r = radius + offset * Math.min(2.1, radius / 42);
-    if (i === 0) ctx.moveTo(Math.cos(angle) * r, Math.sin(angle) * r);
-    else ctx.lineTo(Math.cos(angle) * r, Math.sin(angle) * r);
+  const phase1 = time * 0.6 + seed;
+  const phase2 = -time * 0.8 + seed;
+  const wobbleFactor = Math.min(2.1, radius / 42);
+  for (let i = 0; i <= CELL_STEPS; i++) {
+    const offset = (Math.sin(CELL_ANGLE_5[i] + phase1) * 0.5 + Math.sin(CELL_ANGLE_3[i] + phase2) * 0.6) * wobbleFactor;
+    const r = radius + offset;
+    const px = CELL_COS[i] * r;
+    const py = CELL_SIN[i] * r;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
   }
   ctx.closePath();
 }
@@ -100,6 +123,94 @@ export function paintSkin(ctx: CanvasRenderingContext2D, radius: number, skin: S
     ctx.fillStyle = '#f4e9d5'; ctx.fillRect(-100, -100, 200, 200);
     ctx.fillStyle = '#a69ccc';
     for (let x = -3; x <= 3; x++) for (let y = -3; y <= 3; y++) if ((x + y) % 2 === 0) ctx.fillRect(x * 34, y * 34, 34, 34);
+  } else if (skin === 'galaxy') {
+    ctx.fillStyle = '#1a0933'; ctx.fillRect(-100, -100, 200, 200);
+    ctx.fillStyle = '#9b59b6';
+    circle(ctx, -30, -30, 45); ctx.fill();
+    ctx.fillStyle = '#3498db';
+    circle(ctx, 35, 25, 50); ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    for (const [x, y] of [[-50, 40], [45, -45], [10, -70], [-20, 10], [60, 60]]) { circle(ctx, x, y, 3); ctx.fill(); }
+  } else if (skin === 'fire') {
+    ctx.fillStyle = '#c0392b'; ctx.fillRect(-100, -100, 200, 200);
+    ctx.fillStyle = '#e74c3c'; circle(ctx, 0, 10, 70); ctx.fill();
+    ctx.fillStyle = '#f39c12'; circle(ctx, 0, 25, 50); ctx.fill();
+    ctx.fillStyle = '#f1c40f'; circle(ctx, 0, 40, 25); ctx.fill();
+  } else if (skin === 'neon') {
+    ctx.fillStyle = '#0f172a'; ctx.fillRect(-100, -100, 200, 200);
+    ctx.strokeStyle = '#00cec9'; ctx.lineWidth = 10;
+    circle(ctx, 0, 0, 70); ctx.stroke();
+    ctx.strokeStyle = '#fd79a8'; ctx.lineWidth = 6;
+    circle(ctx, 0, 0, 45); ctx.stroke();
+    ctx.fillStyle = '#00cec9'; circle(ctx, 0, 0, 15); ctx.fill();
+  } else if (skin === 'gold') {
+    ctx.fillStyle = '#d4ac0d'; ctx.fillRect(-100, -100, 200, 200);
+    ctx.fillStyle = '#f1c40f'; circle(ctx, 0, 0, 75); ctx.fill();
+    ctx.fillStyle = '#fef5d1';
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2;
+      circle(ctx, Math.cos(a) * 45, Math.sin(a) * 45, 8); ctx.fill();
+    }
+  } else if (skin === 'venom') {
+    ctx.fillStyle = '#1e272e'; ctx.fillRect(-100, -100, 200, 200);
+    ctx.fillStyle = '#10ac84';
+    circle(ctx, -25, -25, 40); ctx.fill();
+    circle(ctx, 30, 30, 45); ctx.fill();
+    ctx.strokeStyle = '#00d2d3'; ctx.lineWidth = 8;
+    ctx.beginPath(); ctx.moveTo(-60, -60); ctx.lineTo(60, 60); ctx.stroke();
+  } else if (skin === 'dragon') {
+    ctx.fillStyle = '#0f3460'; ctx.fillRect(-100, -100, 200, 200);
+    ctx.fillStyle = '#16213e'; circle(ctx, 0, 0, 78); ctx.fill();
+    ctx.fillStyle = '#00b4d8';
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2;
+      circle(ctx, Math.cos(a) * 48, Math.sin(a) * 48, 14); ctx.fill();
+    }
+    ctx.fillStyle = '#e63946';
+    circle(ctx, -22, -12, 9); ctx.fill();
+    circle(ctx, 22, -12, 9); ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    circle(ctx, -20, -14, 3.5); ctx.fill();
+    circle(ctx, 20, -14, 3.5); ctx.fill();
+  } else if (skin === 'phoenix') {
+    ctx.fillStyle = '#800f2f'; ctx.fillRect(-100, -100, 200, 200);
+    ctx.fillStyle = '#c9184a'; circle(ctx, 0, 0, 78); ctx.fill();
+    ctx.fillStyle = '#ff758f'; circle(ctx, 0, 0, 52); ctx.fill();
+    ctx.fillStyle = '#ffb703';
+    circle(ctx, 0, -28, 22); ctx.fill();
+    ctx.strokeStyle = '#fb8500'; ctx.lineWidth = 9;
+    ctx.beginPath();
+    ctx.arc(0, 10, 48, 0.4, Math.PI - 0.4); ctx.stroke();
+  } else if (skin === 'portal') {
+    ctx.fillStyle = '#03071e'; ctx.fillRect(-100, -100, 200, 200);
+    ctx.strokeStyle = '#7209b7'; ctx.lineWidth = 14;
+    circle(ctx, 0, 0, 72); ctx.stroke();
+    ctx.strokeStyle = '#4cc9f0'; ctx.lineWidth = 7;
+    circle(ctx, 0, 0, 45); ctx.stroke();
+    ctx.fillStyle = '#000000'; circle(ctx, 0, 0, 28); ctx.fill();
+    ctx.fillStyle = '#f72585';
+    for (let i = 0; i < 4; i++) {
+      const a = (i / 4) * Math.PI * 2 + time * 2;
+      circle(ctx, Math.cos(a) * 58, Math.sin(a) * 58, 4); ctx.fill();
+    }
+  } else if (skin === 'cyber') {
+    ctx.fillStyle = '#1a102f'; ctx.fillRect(-100, -100, 200, 200);
+    ctx.strokeStyle = '#00f5d4'; ctx.lineWidth = 4;
+    for (let i = -2; i <= 2; i++) {
+      ctx.beginPath(); ctx.moveTo(i * 32, -80); ctx.lineTo(i * 32, 80); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(-80, i * 32); ctx.lineTo(80, i * 32); ctx.stroke();
+    }
+    ctx.fillStyle = '#f72585'; circle(ctx, 0, 0, 36); ctx.fill();
+    ctx.fillStyle = '#ffffff'; circle(ctx, 0, 0, 14); ctx.fill();
+  } else if (skin === 'sakura') {
+    ctx.fillStyle = '#ffe5ec'; ctx.fillRect(-100, -100, 200, 200);
+    ctx.fillStyle = '#ffb3c6';
+    for (let i = 0; i < 5; i++) {
+      const a = (i / 5) * Math.PI * 2;
+      circle(ctx, Math.cos(a) * 38, Math.sin(a) * 38, 24); ctx.fill();
+    }
+    ctx.fillStyle = '#fb6f92'; circle(ctx, 0, 0, 20); ctx.fill();
+    ctx.fillStyle = '#ffeaa7'; circle(ctx, 0, 0, 8); ctx.fill();
   }
   void time;
   ctx.restore();
@@ -152,16 +263,42 @@ export function drawCell(ctx: CanvasRenderingContext2D, x: number, y: number, ra
   ctx.restore();
 }
 
+interface VirusSpikeLUT {
+  cos: Float32Array;
+  sin: Float32Array;
+  rDelta: Float32Array;
+}
+function createSpikeLUT(spikes: number): VirusSpikeLUT {
+  const count = spikes * 2;
+  const cos = new Float32Array(count);
+  const sin = new Float32Array(count);
+  const rDelta = new Float32Array(count);
+  for (let i = 0; i < count; i++) {
+    const angle = (i / count) * TAU;
+    cos[i] = Math.cos(angle);
+    sin[i] = Math.sin(angle);
+    rDelta[i] = i % 2 === 0 ? 3 : -4;
+  }
+  return { cos, sin, rDelta };
+}
+const NORMAL_VIRUS_LUT = createSpikeLUT(34);
+const MOTHER_VIRUS_LUT = createSpikeLUT(44);
+
 function drawVirus(ctx: CanvasRenderingContext2D, x: number, y: number, radius: number, time: number, mother = false, fed = 0) {
   ctx.save();
   ctx.translate(x, y);
+  ctx.rotate(time * 0.013);
   ctx.beginPath();
-  const spikes = mother ? 44 : 34;
-  for (let i = 0; i < spikes * 2; i++) {
-    const angle = i / (spikes * 2) * TAU + time * 0.013;
-    const r = radius + (i % 2 === 0 ? 3 : -4) + fed * 0.6;
-    if (i === 0) ctx.moveTo(Math.cos(angle) * r, Math.sin(angle) * r);
-    else ctx.lineTo(Math.cos(angle) * r, Math.sin(angle) * r);
+  const lut = mother ? MOTHER_VIRUS_LUT : NORMAL_VIRUS_LUT;
+  const count = lut.cos.length;
+  const fedOffset = fed * 0.6;
+  const cos = lut.cos;
+  const sin = lut.sin;
+  const rDelta = lut.rDelta;
+  for (let i = 0; i < count; i++) {
+    const r = radius + rDelta[i] + fedOffset;
+    if (i === 0) ctx.moveTo(cos[i] * r, sin[i] * r);
+    else ctx.lineTo(cos[i] * r, sin[i] * r);
   }
   ctx.closePath();
   ctx.fillStyle = mother ? '#e496b3' : '#9bcf78';
@@ -220,6 +357,11 @@ function drawAttract(ctx: CanvasRenderingContext2D, w: number, h: number, time: 
   drawVirus(ctx, w * 0.76, h * 0.342 + Math.sin(motionTime * 0.22) * 6, 28 * scale, motionTime + 10);
 }
 
+const FOOD_BATCHES: Food[][] = FOOD_COLORS.map(() => []);
+const FOOD_COLOR_MAP: Record<string, number> = {};
+FOOD_COLORS.forEach((color, idx) => { FOOD_COLOR_MAP[color] = idx; });
+const RENDER_CELL_BUFFER: Cell[] = [];
+
 export function renderArena(ctx: CanvasRenderingContext2D, engine: AgarEngine, w: number, h: number, preferences: Preferences, reducedMotion = false) {
   ctx.fillStyle = preferences.dark ? '#20252c' : '#f9fbf9';
   ctx.fillRect(0, 0, w, h);
@@ -233,17 +375,89 @@ export function renderArena(ctx: CanvasRenderingContext2D, engine: AgarEngine, w
   ctx.translate(-x, -y);
   const halfW = w / zoom / 2;
   const halfH = h / zoom / 2;
-  const visible = (px: number, py: number, radius = 10) => px + radius > x - halfW && px - radius < x + halfW && py + radius > y - halfH && py - radius < y + halfH;
+  const minX = x - halfW;
+  const maxX = x + halfW;
+  const minY = y - halfH;
+  const maxY = y + halfH;
+  const visible = (px: number, py: number, radius = 10) => px + radius > minX && px - radius < maxX && py + radius > minY && py - radius < maxY;
   ctx.strokeStyle = preferences.dark ? '#535b67' : '#c9d0ca';
   ctx.lineWidth = 5;
   ctx.strokeRect(0, 0, WORLD_SIZE, WORLD_SIZE);
+
+  if (engine.mode === 'royale' && engine.royaleRadius) {
+    const rx = WORLD_SIZE / 2;
+    const ry = WORLD_SIZE / 2;
+    const rrad = engine.royaleRadius;
+    ctx.save();
+    ctx.strokeStyle = '#a855f7';
+    ctx.lineWidth = 6;
+    ctx.setLineDash([16, 12]);
+    circle(ctx, rx, ry, rrad);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.strokeStyle = 'rgba(168, 85, 247, 0.25)';
+    ctx.lineWidth = 20;
+    circle(ctx, rx, ry, rrad);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.rect(-500, -500, WORLD_SIZE + 1000, WORLD_SIZE + 1000);
+    ctx.arc(rx, ry, rrad, 0, Math.PI * 2, true);
+    ctx.fillStyle = 'rgba(168, 85, 247, 0.1)';
+    ctx.fill();
+    ctx.restore();
+  }
+
+  for (let i = 0; i < FOOD_BATCHES.length; i++) FOOD_BATCHES[i].length = 0;
   for (const food of engine.food) {
-    if (!visible(food.x, food.y)) continue;
-    const shimmer = preferences.quality ? 1 + Math.sin(engine.visualTime * 3 + food.id * 1.7) * 0.08 : 1;
-    circle(ctx, food.x, food.y, food.radius * shimmer);
-    ctx.fillStyle = food.color;
+    if (!visible(food.x, food.y, food.radius + 2)) continue;
+    if (food.kind === 'gold') {
+      const glow = 1 + Math.sin(engine.visualTime * 5 + food.id) * 0.18;
+      ctx.save();
+      ctx.fillStyle = 'rgba(255, 215, 0, 0.35)';
+      circle(ctx, food.x, food.y, food.radius * 1.8 * glow);
+      ctx.fill();
+      ctx.fillStyle = '#ffd700';
+      circle(ctx, food.x, food.y, food.radius);
+      ctx.fill();
+      ctx.fillStyle = '#ffffff';
+      circle(ctx, food.x, food.y, food.radius * 0.35);
+      ctx.fill();
+      ctx.restore();
+    } else if (food.kind === 'speed') {
+      const pulse = 1 + Math.sin(engine.visualTime * 6 + food.id) * 0.15;
+      ctx.save();
+      ctx.fillStyle = 'rgba(0, 206, 201, 0.35)';
+      circle(ctx, food.x, food.y, food.radius * 1.7 * pulse);
+      ctx.fill();
+      ctx.fillStyle = '#00cec9';
+      circle(ctx, food.x, food.y, food.radius);
+      ctx.fill();
+      ctx.fillStyle = '#ffffff';
+      circle(ctx, food.x, food.y, food.radius * 0.35);
+      ctx.fill();
+      ctx.restore();
+    } else {
+      const cIdx = FOOD_COLOR_MAP[food.color] ?? 0;
+      FOOD_BATCHES[cIdx].push(food);
+    }
+  }
+
+  // Batched draw calls for standard food dots
+  for (let c = 0; c < FOOD_BATCHES.length; c++) {
+    const batch = FOOD_BATCHES[c];
+    if (batch.length === 0) continue;
+    ctx.fillStyle = FOOD_COLORS[c];
+    ctx.beginPath();
+    for (let i = 0; i < batch.length; i++) {
+      const f = batch[i];
+      const shimmer = preferences.quality ? 1 + Math.sin(engine.visualTime * 3 + f.id * 1.7) * 0.08 : 1;
+      const r = f.radius * shimmer;
+      ctx.moveTo(f.x + r, f.y);
+      ctx.arc(f.x, f.y, r, 0, TAU);
+    }
     ctx.fill();
   }
+
   for (const mass of engine.ejected) {
     if (!visible(mass.x, mass.y) || mass.mass <= 0) continue;
     circle(ctx, mass.x, mass.y, mass.radius);
@@ -251,8 +465,19 @@ export function renderArena(ctx: CanvasRenderingContext2D, engine: AgarEngine, w
     ctx.strokeStyle = shade(mass.color, 0.88); ctx.lineWidth = 2; ctx.stroke();
   }
   for (const virus of engine.viruses) if (visible(virus.x, virus.y, virus.radius)) drawVirus(ctx, virus.x, virus.y, virus.radius, engine.visualTime, virus.mother, virus.fed);
-  const allCells: Cell[] = engine.owners.flatMap(owner => owner.cells).filter(cell => visible(cell.x, cell.y, cell.radius)).sort((a, b) => a.radius - b.radius);
-  for (const cell of allCells) {
+  RENDER_CELL_BUFFER.length = 0;
+  for (let o = 0; o < engine.owners.length; o++) {
+    const oCells = engine.owners[o].cells;
+    for (let c = 0; c < oCells.length; c++) {
+      const cell = oCells[c];
+      if (visible(cell.x, cell.y, cell.radius)) {
+        RENDER_CELL_BUFFER.push(cell);
+      }
+    }
+  }
+  RENDER_CELL_BUFFER.sort((a, b) => a.radius - b.radius);
+  for (let i = 0; i < RENDER_CELL_BUFFER.length; i++) {
+    const cell = RENDER_CELL_BUFFER[i];
     const owner = engine.owners[cell.owner];
     const protectedCell = owner.protectedUntil > engine.time;
     if (protectedCell) ctx.globalAlpha = 0.8;
@@ -264,9 +489,68 @@ export function renderArena(ctx: CanvasRenderingContext2D, engine: AgarEngine, w
       ctx.setLineDash([4, 5]);
       circle(ctx, cell.x, cell.y, cell.radius + 9); ctx.stroke(); ctx.setLineDash([]);
     }
+    if (owner.id === 0 && engine.speedBoostUntil > engine.time) {
+      ctx.save();
+      ctx.strokeStyle = '#00f2fe';
+      ctx.lineWidth = 3.5;
+      ctx.globalAlpha = 0.65;
+      circle(ctx, cell.x, cell.y, cell.radius + 6);
+      ctx.stroke();
+      ctx.restore();
+    }
+    if (owner.id === 999) {
+      ctx.save();
+      ctx.strokeStyle = '#a855f7';
+      ctx.lineWidth = 6;
+      ctx.globalAlpha = 0.7 + 0.3 * Math.sin(engine.visualTime * 5);
+      circle(ctx, cell.x, cell.y, cell.radius + 14);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+  // Meteor alert zone on arena
+  if (engine.meteorAlert && visible(engine.meteorAlert.x, engine.meteorAlert.y, engine.meteorAlert.radius + 50)) {
+    const ma = engine.meteorAlert;
+    ctx.save();
+    ctx.strokeStyle = '#f59e0b';
+    ctx.lineWidth = 3;
+    ctx.setLineDash([8, 6]);
+    circle(ctx, ma.x, ma.y, ma.radius * (0.85 + 0.15 * Math.sin(engine.visualTime * 6)));
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(245, 158, 11, 0.12)';
+    ctx.fill();
+    ctx.font = '700 18px "Nunito Sans", Arial, sans-serif';
+    ctx.fillStyle = '#f59e0b';
+    ctx.textAlign = 'center';
+    ctx.fillText(`☄️ SAO BĂNG: ${ma.timeRemaining.toFixed(1)}s`, ma.x, ma.y);
+    ctx.restore();
+  }
+  // Floating active emotes
+  for (const emote of engine.activeEmotes) {
+    if (!visible(emote.x, emote.y, 60)) continue;
+    const age = engine.time - emote.born;
+    const progress = Math.min(1, age / emote.duration);
+    const floatY = emote.y - age * 14;
+    const scale = age < 0.2 ? age / 0.2 * 1.3 : (age < 0.35 ? 1.3 - (age - 0.2) * 2 : (progress > 0.8 ? (1 - progress) / 0.2 : 1));
+    ctx.save();
+    ctx.translate(emote.x, floatY);
+    ctx.scale(Math.max(0.1, scale), Math.max(0.1, scale));
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.65)';
+    ctx.beginPath();
+    ctx.arc(0, 0, 22, 0, TAU);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.font = '24px "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(emote.emoji, 0, 1);
+    ctx.restore();
   }
   if (preferences.quality) {
     for (const particle of engine.particles) {
+      if (!visible(particle.x, particle.y, particle.radius)) continue;
       ctx.globalAlpha = Math.max(0, particle.life / 0.45);
       ctx.fillStyle = particle.color;
       circle(ctx, particle.x, particle.y, particle.radius); ctx.fill();
@@ -432,6 +716,33 @@ export function renderMinimap(ctx: CanvasRenderingContext2D, engine: AgarEngine,
   const viewH = Math.min(size, engine.height / engine.camera.zoom / WORLD_SIZE * size);
   ctx.strokeStyle = dark ? '#a3adb7' : '#bac3b9'; ctx.lineWidth = 1;
   ctx.strokeRect(focusX - viewW / 2, focusY - viewH / 2, viewW, viewH);
+  if (engine.mode === 'royale' && engine.royaleRadius) {
+    const rx = size / 2;
+    const ry = size / 2;
+    const rrad = (engine.royaleRadius / WORLD_SIZE) * size;
+    ctx.strokeStyle = '#a855f7';
+    ctx.lineWidth = 1.5;
+    circle(ctx, rx, ry, rrad);
+    ctx.stroke();
+  }
+  if (engine.mode === 'boss') {
+    const bx = size / 2;
+    const by = size / 2;
+    ctx.fillStyle = '#9333ea';
+    circle(ctx, bx, by, 5);
+    ctx.fill();
+    ctx.strokeStyle = '#c084fc';
+    ctx.lineWidth = 1.5;
+    circle(ctx, bx, by, 8);
+    ctx.stroke();
+  }
+  if (engine.meteorAlert) {
+    const mx = (engine.meteorAlert.x / WORLD_SIZE) * size;
+    const my = (engine.meteorAlert.y / WORLD_SIZE) * size;
+    ctx.fillStyle = '#f59e0b';
+    circle(ctx, mx, my, 4 + Math.sin(engine.visualTime * 8) * 1.5);
+    ctx.fill();
+  }
   if (engine.phase === 'lobby') {
     ctx.fillStyle = CELL_COLORS[0]; circle(ctx, size / 2, size / 2, 2.5); ctx.fill();
   }

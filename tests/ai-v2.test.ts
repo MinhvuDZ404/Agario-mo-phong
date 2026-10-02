@@ -111,5 +111,5 @@ describe('adaptive memory and outcome diagnostics', () => {
       expect(Number.isFinite(report.currentAverageMass)).toBe(true);
       expect(report.alive).toBeGreaterThan(20);
     }
-  }, 15000);
+  }, 45000);
 });

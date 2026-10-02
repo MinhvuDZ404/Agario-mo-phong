@@ -4,8 +4,27 @@ export const SAVE_VERSION = 3;
 const STORAGE_KEY = 'agar-community-v3';
 const LEGACY_KEY = 'agar-community-v2';
 
-const SKIN_IDS: SkinId[] = ['classic', 'earth', 'melon', 'smile', 'planet', '8ball', 'sunset', 'checker'];
-const MODES: GameMode[] = ['ffa', 'teams', 'experimental'];
+const SKIN_IDS: SkinId[] = [
+  'classic',
+  'earth',
+  'melon',
+  'smile',
+  'planet',
+  '8ball',
+  'sunset',
+  'checker',
+  'galaxy',
+  'fire',
+  'neon',
+  'gold',
+  'venom',
+  'dragon',
+  'phoenix',
+  'portal',
+  'cyber',
+  'sakura',
+];
+const MODES: GameMode[] = ['ffa', 'teams', 'experimental', 'royale', 'turbo', 'boss'];
 
 export interface BestStats {
   bestMass: number;
@@ -27,6 +46,8 @@ export interface SaveData {
   preferences: Preferences;
   achievements: string[];
   best: BestStats;
+  exp: number;
+  level: number;
 }
 
 /** Strip control characters, trim, and cap length so nicknames can never break UI. */
@@ -89,7 +110,41 @@ function normalize(raw: unknown): SaveData {
     preferences: sanitizePreferences(source.preferences),
     achievements: sanitizeAchievements(source.achievements),
     best,
+    exp: sanitizeNumber(source.exp, 0, 0, 100_000_000),
+    level: sanitizeNumber(source.level, 1, 1, 50),
   };
+}
+
+export function getExpForLevel(level: number): number {
+  return Math.round(120 * Math.pow(1.18, Math.max(0, level - 1)));
+}
+
+export function calculateLevel(totalExp: number): {
+  level: number;
+  currentExp: number;
+  nextLevelExp: number;
+  title: string;
+} {
+  let level = 1;
+  let remaining = Math.max(0, totalExp);
+  const titles = [
+    'Tân Binh Đấu Trường',
+    'Thợ Săn Tế Bào',
+    'Chiến Binh Sinh Khối',
+    'Thực Thể Khổng Lồ',
+    'Chúa Tể Sinh Vật',
+    'Thực Thể Vũ Trụ Tối Cao',
+  ];
+  while (level < 50) {
+    const needed = getExpForLevel(level);
+    if (remaining < needed) {
+      const titleIndex = Math.min(titles.length - 1, Math.floor((level - 1) / 10));
+      return { level, currentExp: remaining, nextLevelExp: needed, title: titles[titleIndex] };
+    }
+    remaining -= needed;
+    level++;
+  }
+  return { level: 50, currentExp: 0, nextLevelExp: 0, title: titles[titles.length - 1] };
 }
 
 function readRaw(key: string): unknown {
@@ -135,11 +190,14 @@ export const ACHIEVEMENTS: Achievement[] = [
   { id: 'mass-100', name: 'Trăm cân', hint: 'Đạt 100 khối lượng' },
   { id: 'mass-500', name: 'Kẻ săn mồi', hint: 'Đạt 500 khối lượng' },
   { id: 'mass-1500', name: 'Quái vật arena', hint: 'Đạt 1.500 khối lượng' },
+  { id: 'mass-3000', name: 'Đại hồng thủy', hint: 'Đạt 3.000 khối lượng' },
   { id: 'top-10', name: 'Góp mặt top 10', hint: 'Lọt vào top 10' },
   { id: 'rank-1', name: 'Bá chủ arena', hint: 'Vươn lên hạng 1' },
   { id: 'survive-5', name: 'Sống dai', hint: 'Sống sót 5 phút' },
   { id: 'split-hunter', name: 'Thợ săn phân tách', hint: 'Ăn 5 tế bào khi đang tách' },
   { id: 'pellet-500', name: 'Máy hút hạt', hint: 'Ăn 500 hạt trong một ván' },
+  { id: 'pellet-1000', name: 'Hố đen ẩm thực', hint: 'Ăn 1.000 hạt trong một ván' },
+  { id: 'speed-demon', name: 'Thần tốc', hint: 'Đạt 800 khối lượng khi bơi' },
 ];
 
 /** Pure check: given live snapshot data, which achievement ids are newly earned? */
@@ -159,10 +217,13 @@ export function earnedAchievements(
   grant('mass-100', stats.peak >= 100);
   grant('mass-500', stats.peak >= 500);
   grant('mass-1500', stats.peak >= 1500);
+  grant('mass-3000', stats.peak >= 3000);
   grant('top-10', stats.bestRank >= 1 && stats.bestRank <= 10);
   grant('rank-1', stats.bestRank === 1);
   grant('survive-5', stats.seconds >= 300);
   grant('split-hunter', stats.splitEats >= 5);
   grant('pellet-500', stats.food >= 500);
+  grant('pellet-1000', stats.food >= 1000);
+  grant('speed-demon', stats.peak >= 800);
   return fresh;
 }

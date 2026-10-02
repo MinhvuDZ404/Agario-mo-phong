@@ -1,8 +1,54 @@
 import { BALANCE } from './config';
 
-export type GameMode = 'ffa' | 'teams' | 'experimental';
+export type GameMode = 'ffa' | 'teams' | 'experimental' | 'royale' | 'turbo' | 'boss';
 export type GamePhase = 'lobby' | 'playing' | 'spectating' | 'ended';
-export type SkinId = 'classic' | 'earth' | 'melon' | 'smile' | 'planet' | '8ball' | 'sunset' | 'checker';
+export type EmoteKind = 'cool' | 'panic' | 'devil' | 'crown' | 'heart' | 'lightning';
+
+export interface ActiveEmote {
+  ownerId: number;
+  kind: EmoteKind;
+  emoji: string;
+  x: number;
+  y: number;
+  born: number;
+  duration: number;
+}
+
+export interface BossState {
+  name: string;
+  mass: number;
+  maxMass: number;
+  x: number;
+  y: number;
+  alive: boolean;
+}
+
+export interface MeteorAlert {
+  x: number;
+  y: number;
+  radius: number;
+  active: boolean;
+  timeRemaining: number;
+}
+export type SkinId =
+  | 'classic'
+  | 'earth'
+  | 'melon'
+  | 'smile'
+  | 'planet'
+  | '8ball'
+  | 'sunset'
+  | 'checker'
+  | 'galaxy'
+  | 'fire'
+  | 'neon'
+  | 'gold'
+  | 'venom'
+  | 'dragon'
+  | 'phoenix'
+  | 'portal'
+  | 'cyber'
+  | 'sakura';
 
 /** AI personality archetype — weights live in config, decisions in `ai.ts`. */
 export type AiArchetype =
@@ -125,6 +171,14 @@ export interface Food {
   color: string;
   mass: number;
   radius: number;
+  kind?: 'normal' | 'gold' | 'speed';
+}
+
+export interface CombatNotice {
+  id: number;
+  text: string;
+  time: number;
+  highlight?: boolean;
 }
 
 export interface EjectedMass extends Food {
@@ -196,6 +250,15 @@ export interface ArenaSnapshot {
   teamShares: number[];
   spectating: string;
   mergeIn: number;
+  royaleRadius?: number;
+  royaleCenter?: { x: number; y: number };
+  speedBoostRemaining?: number;
+  combatNotices?: CombatNotice[];
+  streak?: number;
+  royaleWinner?: boolean;
+  boss?: BossState;
+  meteorAlert?: MeteorAlert;
+  activeEmotes?: ActiveEmote[];
 }
 
 export const DEFAULT_PREFERENCES: Preferences = {

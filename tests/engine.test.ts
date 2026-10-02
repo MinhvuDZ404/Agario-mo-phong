@@ -209,6 +209,70 @@ describe('virus', () => {
     expect(engine.validateInvariants()).toEqual([]);
   });
 
+  it('allows 16-cell player to eat virus safely without bursting or penalty (virus farming)', () => {
+    const engine = soloEngine();
+    engine.player.protectedUntil = 0;
+    const initialCell = engine.player.cells[0];
+    initialCell.mass = 300;
+
+    // Manually split/fill up to exactly 16 cells (maxFragments)
+    while (engine.player.cells.length < BALANCE.maxFragments) {
+      const idx = engine.player.cells.length;
+      engine.player.cells.push({
+        id: 99000 + idx,
+        owner: 0,
+        x: 1000 + idx * 10,
+        y: 1000 + idx * 10,
+        lx: 1000 + idx * 10,
+        ly: 1000 + idx * 10,
+        vx: 0,
+        vy: 0,
+        radius: 20,
+        mass: 50,
+        pulse: 0,
+        born: 0,
+        mergeAt: 100,
+        alive: true,
+      });
+    }
+    expect(engine.player.cells).toHaveLength(BALANCE.maxFragments);
+
+    const targetCell = engine.player.cells[0];
+    const massBefore = targetCell.mass;
+    const virus = engine.viruses[0];
+    virus.mother = false;
+    targetCell.x = virus.x;
+    targetCell.y = virus.y;
+
+    step(engine, 0.3);
+
+    // In authentic Agar.io, cell count stays 16 and mass increases by virusBonusMass (no 15% penalty)
+    expect(engine.player.cells).toHaveLength(BALANCE.maxFragments);
+    expect(targetCell.mass).toBeGreaterThanOrEqual(massBefore + BALANCE.virusBonusMass - 1);
+    expect(engine.validateInvariants()).toEqual([]);
+  });
+
+  it('conserves total mass during virus explosion', () => {
+    const engine = soloEngine();
+    const player = engine.player.cells[0];
+    const initialMass = 800;
+    player.mass = initialMass;
+    engine.player.protectedUntil = 0;
+    const virus = engine.viruses[0];
+    virus.mother = false;
+    player.x = virus.x;
+    player.y = virus.y;
+
+    step(engine, 0.05); // Just enough to trigger collision and burst
+
+    const totalMassAfter = engine.player.cells.reduce((sum, c) => sum + c.mass, 0);
+    // Total mass should equal initialMass + virusBonusMass (minus tiny fractional dt decay)
+    expect(totalMassAfter).toBeGreaterThanOrEqual(initialMass + BALANCE.virusBonusMass - 2);
+    expect(totalMassAfter).toBeLessThanOrEqual(initialMass + BALANCE.virusBonusMass + 0.1);
+    expect(engine.player.cells.length).toBeGreaterThan(4);
+    expect(engine.validateInvariants()).toEqual([]);
+  });
+
   it('ignores small cells', () => {
     const engine = soloEngine();
     const player = engine.player.cells[0];
@@ -279,5 +343,42 @@ describe('leaderboard and ranking', () => {
     const sorted = [...masses].sort((a, b) => b - a);
     expect(masses).toEqual(sorted);
     expect(snapshot.population).toBeGreaterThan(0);
+  });
+});
+
+describe('magna opus features', () => {
+  it('spawns Kraken Titan in boss mode', () => {
+    const engine = fullEngine();
+    engine.start('Hero', 'boss', 'classic', '#ee7b58');
+    expect(engine.mode).toBe('boss');
+    const titan = engine.ownerById(999);
+    expect(titan).toBeDefined();
+    expect(titan?.name).toBe('KRAKEN TITAN');
+    expect(titan?.cells[0].mass).toBe(BALANCE.bossMass);
+    const snap = engine.snapshot();
+    expect(snap.boss?.alive).toBe(true);
+    expect(snap.boss?.name).toBe('KRAKEN TITAN');
+  });
+
+  it('triggers and expires emotes', () => {
+    const engine = fullEngine();
+    engine.start('Hero', 'ffa', 'classic', '#ee7b58');
+    engine.triggerEmote('crown');
+    expect(engine.activeEmotes.length).toBeGreaterThanOrEqual(1);
+    expect(engine.activeEmotes.some(e => e.ownerId === 0 && e.emoji === '👑')).toBe(true);
+    const snap = engine.snapshot();
+    expect(snap.activeEmotes?.some(e => e.ownerId === 0 && e.emoji === '👑')).toBe(true);
+    step(engine, 3.5);
+    expect(engine.activeEmotes.some(e => e.ownerId === 0)).toBe(false);
+  });
+
+  it('triggers meteor shower event over time', () => {
+    const engine = fullEngine();
+    engine.start('Hero', 'ffa', 'classic', '#ee7b58');
+    engine.player.protectedUntil = 999;
+    step(engine, 47);
+    expect(engine.meteorAlert).not.toBeNull();
+    step(engine, 5);
+    expect(engine.meteorAlert).toBeNull();
   });
 });

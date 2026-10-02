@@ -41,6 +41,9 @@ export const BALANCE = {
   virusCount: 24,
   maxViruses: 38,
   motherCells: 5,
+  bossMass: 10000,
+  bossMaxMass: 10000,
+  meteorCooldown: 85,
 
   // -- Mass / radius --------------------------------------------------------
   radiusFactor: 5,

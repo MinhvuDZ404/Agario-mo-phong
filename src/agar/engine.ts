@@ -6,37 +6,86 @@ import { AI, BALANCE, cellSpeed, massRadius, mergeDelay, zoomForMass } from './c
 import { arenaSound } from './sound';
 import {
   CELL_COLORS, FOOD_COLORS, TEAM_COLORS,
-  type AiArchetype, type ArenaSnapshot, type Cell, type EjectedMass, type Floater, type Food,
-  type GameMode, type GamePhase, type Organism, type Particle, type RunStats, type SkinId, type Virus,
+  type ActiveEmote, type AiArchetype, type ArenaSnapshot, type Cell, type CombatNotice,
+  type EjectedMass, type EmoteKind, type Floater, type Food,
+  type GameMode, type GamePhase, type MeteorAlert, type Organism, type Particle, type RunStats, type SkinId, type Virus,
 } from './types';
 
 const WORLD = BALANCE.worldSize;
-const GRID_SIZE = 140;
 const NAMES = ['nova', 'moon', 'blob', 'Orbit', 'tiny', 'jelly', 'pixel', 'miso', 'cosmo', 'Boba', 'just a cell', 'Noodle', 'pluto', 'chill', 'big little', 'Mochi', 'nebula', 'peach', 'no name', 'echo', 'bloop', 'Sushi', 'coco', 'leaf', 'bubble', 'kiwi', 'hello', 'mango', 'noodle soup', 'squish', 'pudding', 'stardust', 'not food', 'panda', 'luna', 'slowly', 'taro', 'moss', 'little bean', 'daisy', 'marble', 'Cloud', 'mint', 'bonbon', 'jupiter', 'soda', 'sprout', 'wobble'];
 const ARCHETYPES: AiArchetype[] = ['hunter', 'opportunist', 'coward', 'collector', 'wanderer', 'ambusher', 'survivor', 'giant', 'splitter'];
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 const distance = (a: { x: number; y: number }, b: { x: number; y: number }) => Math.hypot(a.x - b.x, a.y - b.y);
 
+const GRID_COLS = 40;
+const GRID_ROWS = 40;
+const GRID_CELL_SIZE = 160;
+
 // Food stays indexed as it respawns, so bots and cells only inspect nearby buckets.
 class FoodIndex {
-  private buckets = new Map<number, Set<Food>>();
-  private key(x: number, y: number) { return Math.floor(x / GRID_SIZE) + Math.floor(y / GRID_SIZE) * 100; }
-  add(food: Food) {
-    const key = this.key(food.x, food.y);
-    if (!this.buckets.has(key)) this.buckets.set(key, new Set());
-    this.buckets.get(key)!.add(food);
+  private buckets: (Food[] | undefined)[] = new Array(GRID_COLS * GRID_ROWS);
+
+  private key(x: number, y: number): number {
+    const gx = Math.max(0, Math.min(GRID_COLS - 1, Math.floor(x / GRID_CELL_SIZE)));
+    const gy = Math.max(0, Math.min(GRID_ROWS - 1, Math.floor(y / GRID_CELL_SIZE)));
+    return gx + gy * GRID_COLS;
   }
-  remove(food: Food) { this.buckets.get(this.key(food.x, food.y))?.delete(food); }
-  *near(x: number, y: number, radius: number): Generator<Food> {
-    const left = Math.floor((x - radius) / GRID_SIZE);
-    const right = Math.floor((x + radius) / GRID_SIZE);
-    const top = Math.floor((y - radius) / GRID_SIZE);
-    const bottom = Math.floor((y + radius) / GRID_SIZE);
+
+  add(food: Food) {
+    const k = this.key(food.x, food.y);
+    let bucket = this.buckets[k];
+    if (!bucket) {
+      bucket = [];
+      this.buckets[k] = bucket;
+    }
+    bucket.push(food);
+  }
+
+  remove(food: Food) {
+    const k = this.key(food.x, food.y);
+    const bucket = this.buckets[k];
+    if (!bucket) return;
+    const idx = bucket.indexOf(food);
+    if (idx !== -1) {
+      const last = bucket.pop()!;
+      if (idx < bucket.length) {
+        bucket[idx] = last;
+      }
+    }
+  }
+
+  forEachNear(x: number, y: number, radius: number, cb: (food: Food) => boolean | void) {
+    const left = Math.max(0, Math.floor((x - radius) / GRID_CELL_SIZE));
+    const right = Math.min(GRID_COLS - 1, Math.floor((x + radius) / GRID_CELL_SIZE));
+    const top = Math.max(0, Math.floor((y - radius) / GRID_CELL_SIZE));
+    const bottom = Math.min(GRID_ROWS - 1, Math.floor((y + radius) / GRID_CELL_SIZE));
     for (let gy = top; gy <= bottom; gy++) {
+      const rowOffset = gy * GRID_COLS;
       for (let gx = left; gx <= right; gx++) {
-        const bucket = this.buckets.get(gx + gy * 100);
-        if (bucket) yield* bucket;
+        const bucket = this.buckets[rowOffset + gx];
+        if (!bucket) continue;
+        for (let i = 0; i < bucket.length; i++) {
+          if (cb(bucket[i]) === false) return;
+        }
+      }
+    }
+  }
+
+  *near(x: number, y: number, radius: number): Generator<Food> {
+    const left = Math.max(0, Math.floor((x - radius) / GRID_CELL_SIZE));
+    const right = Math.min(GRID_COLS - 1, Math.floor((x + radius) / GRID_CELL_SIZE));
+    const top = Math.max(0, Math.floor((y - radius) / GRID_CELL_SIZE));
+    const bottom = Math.min(GRID_ROWS - 1, Math.floor((y + radius) / GRID_CELL_SIZE));
+    for (let gy = top; gy <= bottom; gy++) {
+      const rowOffset = gy * GRID_COLS;
+      for (let gx = left; gx <= right; gx++) {
+        const bucket = this.buckets[rowOffset + gx];
+        if (bucket) {
+          for (let i = 0; i < bucket.length; i++) {
+            yield bucket[i];
+          }
+        }
       }
     }
   }
@@ -64,6 +113,20 @@ export class AgarEngine {
   stats: RunStats = this.emptyStats();
   /** Dev-only strategy overlay. Production stays off unless `?debug=1`. */
   aiDebug = false;
+  speedBoostUntil = 0;
+  royaleRadius = WORLD / 2;
+  combatNotices: CombatNotice[] = [];
+  killStreak = 0;
+  lastKillTime = 0;
+  royaleWinner = false;
+  activeEmotes: ActiveEmote[] = [];
+  meteorAlert: MeteorAlert | null = null;
+  private nextMeteorTime = 50;
+  private bossShockwaveAt = 0;
+  private bossSpikeAt = 0;
+  private lastBotEmoteCheck = 0;
+  private bossDefeated = false;
+  private lastRoyaleWarning = 0;
   private nextId = 1;
   private seed = 42791;
   private index = new FoodIndex();
@@ -73,6 +136,12 @@ export class AgarEngine {
   private brains = new Map<number, BotBrain>();
   private ownerMap = new Map<number, Organism>();
   private aiTotals: AiTotals = createTotals();
+  private eatenFoodScratch: Food[] = [];
+  private cellBuffer: Cell[] = [];
+  private activeCellList: Cell[] = [];
+  private visibleCellsBuffer: Cell[] = [];
+  private visibleVirusesBuffer: Virus[] = [];
+  private visibleEjectedBuffer: EjectedMass[] = [];
   /** Wall-clock diagnostics only; never feeds back into deterministic gameplay. */
   private aiTimeMs = 0;
   private aiDecisions = 0;
@@ -84,6 +153,31 @@ export class AgarEngine {
   constructor(seed = 42791) {
     this.seed = seed >>> 0;
     this.populate();
+  }
+
+  triggerEmote(kind: EmoteKind, ownerId = 0) {
+    const owner = this.ownerById(ownerId);
+    if (!owner?.cells.length) return;
+    const emojiMap: Record<EmoteKind, string> = {
+      cool: '😎',
+      panic: '😱',
+      devil: '😈',
+      crown: '👑',
+      heart: '❤️',
+      lightning: '⚡',
+    };
+    const main = owner.cells.reduce((max, c) => (c.mass > max.mass ? c : max), owner.cells[0]);
+    this.activeEmotes.push({
+      ownerId,
+      kind,
+      emoji: emojiMap[kind] || '😎',
+      x: main.x,
+      y: main.y - main.radius - 24,
+      born: this.time,
+      duration: 2.5,
+    });
+    if (this.activeEmotes.length > 25) this.activeEmotes.shift();
+    if (ownerId === 0) arenaSound.play('emote');
   }
 
   private emptyStats(): RunStats {
@@ -102,6 +196,11 @@ export class AgarEngine {
 
   ownerById(id: number): Organism | undefined {
     return this.owners.find(owner => owner.id === id);
+  }
+
+  addNotice(text: string, highlight = false) {
+    this.combatNotices.push({ id: this.nextId++, text, time: this.time, highlight });
+    if (this.combatNotices.length > 5) this.combatNotices.shift();
   }
 
   private makeCell(owner: number, x: number, y: number, mass: number): Cell {
@@ -153,12 +252,29 @@ export class AgarEngine {
   }
 
   private addFood(x?: number, y?: number) {
+    const roll = this.random();
+    let kind: 'normal' | 'gold' | 'speed' = 'normal';
+    let color = FOOD_COLORS[Math.floor(this.random() * FOOD_COLORS.length)];
+    let mass = BALANCE.pelletMinMass + this.random() * BALANCE.pelletBonusMass;
+    let radius = 3.2 + this.random() * 2.1;
+    if (roll < 0.025) {
+      kind = 'gold';
+      color = '#ffd700';
+      mass = 25;
+      radius = 7.5;
+    } else if (roll < 0.045) {
+      kind = 'speed';
+      color = '#00f2fe';
+      mass = 12;
+      radius = 6.2;
+    }
     const food: Food = {
       id: this.nextId++,
       x: x ?? this.coordinate(12), y: y ?? this.coordinate(12),
-      color: FOOD_COLORS[Math.floor(this.random() * FOOD_COLORS.length)],
-      mass: BALANCE.pelletMinMass + this.random() * BALANCE.pelletBonusMass,
-      radius: 3.2 + this.random() * 2.1,
+      color,
+      mass,
+      radius,
+      kind,
     };
     this.food.push(food);
     this.index.add(food);
@@ -167,6 +283,23 @@ export class AgarEngine {
 
   private resetFood(food: Food, x?: number, y?: number) {
     this.index.remove(food);
+    const roll = this.random();
+    if (roll < 0.025) {
+      food.kind = 'gold';
+      food.color = '#ffd700';
+      food.mass = 25;
+      food.radius = 7.5;
+    } else if (roll < 0.045) {
+      food.kind = 'speed';
+      food.color = '#00f2fe';
+      food.mass = 12;
+      food.radius = 6.2;
+    } else {
+      food.kind = 'normal';
+      food.color = FOOD_COLORS[Math.floor(this.random() * FOOD_COLORS.length)];
+      food.mass = BALANCE.pelletMinMass + this.random() * BALANCE.pelletBonusMass;
+      food.radius = 3.2 + this.random() * 2.1;
+    }
     food.x = clamp(x ?? this.coordinate(12), 12, WORLD - 12);
     food.y = clamp(y ?? this.coordinate(12), 12, WORLD - 12);
     this.index.add(food);
@@ -182,6 +315,17 @@ export class AgarEngine {
         this.viruses[i].radius = BALANCE.motherRadius;
       }
     }
+    if (this.mode === 'boss') {
+      const titan = this.makeOwner(999, 'KRAKEN TITAN', '#150d2a', 'portal', 0);
+      titan.cells = [this.makeCell(999, WORLD / 2, WORLD / 2, BALANCE.bossMass)];
+      titan.targetX = WORLD / 2;
+      titan.targetY = WORLD / 2;
+      this.owners.push(titan);
+      this.addNotice('⚔️ KRAKEN TITAN ĐÃ THỨC TỈNH Ở TRUNG TÂM ARENA!', true);
+      this.bossDefeated = false;
+      this.bossShockwaveAt = this.time + 4.5;
+      this.bossSpikeAt = this.time + 7.5;
+    }
   }
 
   start(name: string, mode: GameMode, skin: SkinId, color: string) {
@@ -196,6 +340,10 @@ export class AgarEngine {
     this.ejected = [];
     this.particles = [];
     this.floaters = [];
+    this.activeEmotes = [];
+    this.meteorAlert = null;
+    this.nextMeteorTime = 50;
+    this.bossDefeated = false;
     this.ejectAt = 0;
     this.rankAt = 0;
     this.lastRank = 0;
@@ -211,9 +359,18 @@ export class AgarEngine {
     this.player.name = name.trim().slice(0, 18) || 'Vô danh';
     this.player.skin = skin;
     this.player.color = color;
-    this.player.cells = [this.makeCell(0, WORLD / 2, WORLD / 2, BALANCE.startMass)];
+    const startX = this.mode === 'boss' ? WORLD / 2 - 1200 : WORLD / 2;
+    const startY = this.mode === 'boss' ? WORLD / 2 - 1200 : WORLD / 2;
+    this.player.cells = [this.makeCell(0, startX, startY, BALANCE.startMass)];
     this.player.protectedUntil = BALANCE.spawnProtection;
-    this.camera = { x: WORLD / 2, y: WORLD / 2, zoom: 1.15 };
+    this.speedBoostUntil = 0;
+    this.royaleRadius = WORLD / 2;
+    this.combatNotices = [];
+    this.killStreak = 0;
+    this.lastKillTime = 0;
+    this.royaleWinner = false;
+    this.lastRoyaleWarning = 0;
+    this.camera = { x: startX, y: startY, zoom: 1.15 };
     this.configureMode();
     // The first few seconds teach movement without placing a giant on the spawn point.
     for (let i = 0; i < 45; i++) {
@@ -300,11 +457,156 @@ export class AgarEngine {
     const started = performance.now();
     this.time += dt;
     if (this.phase === 'playing') this.stats.seconds += dt;
-    const cells = this.owners.flatMap(owner => owner.cells).filter(cell => cell.alive);
+    if (this.mode === 'royale') {
+      if (this.time > 15) {
+        this.royaleRadius = Math.max(260, WORLD / 2 - (this.time - 15) * 16);
+        if (this.time - this.lastRoyaleWarning > 18 && this.royaleRadius > 350) {
+          this.lastRoyaleWarning = this.time;
+          arenaSound.play('royale_alarm');
+          this.addNotice('⚡ CẢNH BÁO: VÒNG BO ĐANG CO LẠI!', true);
+        }
+      }
+      for (const owner of this.owners) {
+        for (const cell of owner.cells) {
+          const dist = Math.hypot(cell.x - WORLD / 2, cell.y - WORLD / 2);
+          if (dist > this.royaleRadius) {
+            cell.mass = Math.max(10, cell.mass - cell.mass * 0.045 * dt);
+            if (this.random() < 0.1) this.burst(cell.x, cell.y, '#a855f7', 1);
+          }
+        }
+      }
+      const alive = this.owners.filter(o => o.cells.length > 0);
+      if (alive.length === 1 && alive[0].id === 0 && !this.royaleWinner) {
+        this.royaleWinner = true;
+        arenaSound.play('achievement');
+        this.addNotice('👑 VICTORY ROYALE! BẠN LÀ NGƯỜI SỐNG SÓT CUỐI CÙNG!', true);
+      }
+    }
+
+    // Emotes tracking
+    for (const emote of this.activeEmotes) {
+      const owner = this.ownerById(emote.ownerId);
+      if (owner?.cells.length) {
+        const main = owner.cells.reduce((max, c) => (c.mass > max.mass ? c : max), owner.cells[0]);
+        emote.x = main.x;
+        emote.y = main.y - main.radius - 22;
+      }
+    }
+    this.activeEmotes = this.activeEmotes.filter(e => this.time - e.born < e.duration);
+
+    // Bot AI reactive emotes
+    if (this.time - this.lastBotEmoteCheck > 1.2) {
+      this.lastBotEmoteCheck = this.time;
+      for (const owner of this.owners) {
+        if (owner.id === 0 || !owner.cells.length) continue;
+        const brain = this.brains.get(owner.id);
+        if (!brain) continue;
+        if (brain.threatScore > 0.82 && owner.archetype === 'coward' && this.random() < 0.25) {
+          this.triggerEmote('panic', owner.id);
+        } else if (brain.lastAction === 'split' && owner.archetype === 'hunter' && this.random() < 0.3) {
+          this.triggerEmote('devil', owner.id);
+        }
+      }
+    }
+
+    // Meteor shower dynamic event
+    if (this.time >= this.nextMeteorTime - 5 && !this.meteorAlert) {
+      const mx = this.coordinate(400);
+      const my = this.coordinate(400);
+      this.meteorAlert = { x: mx, y: my, radius: 320, active: true, timeRemaining: 5 };
+      this.addNotice('☄️ CẢNH BÁO: MƯA SAO BĂNG SẮP RƠI XUỐNG ARENA!', true);
+      arenaSound.play('royale_alarm');
+    }
+    if (this.meteorAlert) {
+      this.meteorAlert.timeRemaining -= dt;
+      if (this.meteorAlert.timeRemaining <= 0) {
+        const mx = this.meteorAlert.x;
+        const my = this.meteorAlert.y;
+        arenaSound.play('meteor');
+        for (let i = 0; i < 24; i++) {
+          const angle = this.random() * Math.PI * 2;
+          const r = this.random() * 260;
+          this.addFood(clamp(mx + Math.cos(angle) * r, 20, WORLD - 20), clamp(my + Math.sin(angle) * r, 20, WORLD - 20));
+        }
+        this.burst(mx, my, '#ffd700', 30);
+        this.burst(mx, my, '#00f2fe', 20);
+        this.addNotice('🌟 MƯA SAO BĂNG ĐÃ ĐÁNH XUỐNG! NHẶT HẠT VÀNG NGAY!', true);
+        this.meteorAlert = null;
+        this.nextMeteorTime = this.time + BALANCE.meteorCooldown;
+      }
+    }
+
+    // Boss Titan logic
+    if (this.mode === 'boss') {
+      const titan = this.ownerById(999);
+      if (titan && titan.cells.length && titan.cells[0].alive) {
+        const tCell = titan.cells[0];
+        if (this.time >= this.bossShockwaveAt) {
+          this.bossShockwaveAt = this.time + 4.8;
+          arenaSound.play('titan_roar');
+          this.burst(tCell.x, tCell.y, '#9333ea', 25);
+          this.addFloater(tCell.x, tCell.y - tCell.radius, 'KRAKEN ROAR!', '#c084fc');
+          for (const owner of this.owners) {
+            if (owner.id === 999) continue;
+            for (const cell of owner.cells) {
+              const d = Math.hypot(cell.x - tCell.x, cell.y - tCell.y);
+              if (d < tCell.radius + 300 && d > 1) {
+                const push = (tCell.radius + 300 - d) * 0.75;
+                const angle = Math.atan2(cell.y - tCell.y, cell.x - tCell.x);
+                cell.vx += Math.cos(angle) * push;
+                cell.vy += Math.sin(angle) * push;
+              }
+            }
+          }
+        }
+        if (this.time >= this.bossSpikeAt) {
+          this.bossSpikeAt = this.time + 7.5;
+          for (let i = 0; i < 4; i++) {
+            const angle = (i / 4) * Math.PI * 2 + this.time;
+            const sx = tCell.x + Math.cos(angle) * (tCell.radius + 15);
+            const sy = tCell.y + Math.sin(angle) * (tCell.radius + 15);
+            this.ejected.push({
+              id: this.nextId++,
+              x: sx,
+              y: sy,
+              color: '#a855f7',
+              mass: 20,
+              radius: massRadius(20),
+              vx: Math.cos(angle) * 420,
+              vy: Math.sin(angle) * 420,
+              born: this.time,
+              owner: 999,
+              kind: 'gold',
+            });
+          }
+        }
+      } else if (!this.bossDefeated) {
+        this.bossDefeated = true;
+        arenaSound.play('achievement');
+        this.addNotice('💥 KRAKEN TITAN ĐÃ BỊ TIÊU DIỆT! MƯA VÀNG BÙNG NỔ!', true);
+        for (let i = 0; i < 60; i++) {
+          const angle = this.random() * Math.PI * 2;
+          const r = this.random() * 450;
+          const f = this.addFood(clamp(WORLD / 2 + Math.cos(angle) * r, 20, WORLD - 20), clamp(WORLD / 2 + Math.sin(angle) * r, 20, WORLD - 20));
+          f.kind = 'gold';
+          f.color = '#ffd700';
+          f.mass = 25;
+        }
+        this.burst(WORLD / 2, WORLD / 2, '#ffd700', 50);
+      }
+    }
+    this.activeCellList.length = 0;
+    for (let o = 0; o < this.owners.length; o++) {
+      const oCells = this.owners[o].cells;
+      for (let c = 0; c < oCells.length; c++) {
+        if (oCells[c].alive) this.activeCellList.push(oCells[c]);
+      }
+    }
+    const cells = this.activeCellList;
     this.ownerMap.clear();
     for (const owner of this.owners) this.ownerMap.set(owner.id, owner);
     for (const owner of this.owners) {
-      if (owner.id !== 0 && !owner.cells.length && this.time >= owner.respawnAt) this.respawnBot(owner);
+      if (this.mode !== 'royale' && owner.id !== 0 && !owner.cells.length && this.time >= owner.respawnAt) this.respawnBot(owner);
       if (!owner.cells.length) continue;
       if (owner.id === 0) this.updatePlayerTarget();
       else if (this.time >= owner.nextDecision) this.decide(owner, cells);
@@ -408,35 +710,102 @@ export class AgarEngine {
     const focusY = this.phase === 'spectating' ? this.camera.y : (this.player.cells[0]?.y ?? this.camera.y);
     const main = owner.cells.reduce((a, b) => a.mass > b.mass ? a : b);
     const reach = AI.perception.max;
-    const visibleCells = cells.filter(cell => {
-      if (cell.owner === owner.id) return true;
-      for (const mine of owner.cells) {
-        if (Math.abs(cell.x - mine.x) <= reach && Math.abs(cell.y - mine.y) <= reach) return true;
+    const oCells = owner.cells;
+    const isSingle = oCells.length === 1;
+    const m0 = oCells[0];
+    let minX = m0.x - reach;
+    let maxX = m0.x + reach;
+    let minY = m0.y - reach;
+    let maxY = m0.y + reach;
+    if (!isSingle) {
+      for (let i = 1; i < oCells.length; i++) {
+        const c = oCells[i];
+        if (c.x - reach < minX) minX = c.x - reach;
+        if (c.x + reach > maxX) maxX = c.x + reach;
+        if (c.y - reach < minY) minY = c.y - reach;
+        if (c.y + reach > maxY) maxY = c.y + reach;
       }
-      return false;
-    });
-    const visibleViruses = this.viruses.filter(virus => {
-      for (const mine of owner.cells) {
-        if (Math.abs(virus.x - mine.x) <= reach && Math.abs(virus.y - mine.y) <= reach) return true;
+    }
+
+    this.visibleCellsBuffer.length = 0;
+    for (let i = 0; i < cells.length; i++) {
+      const cell = cells[i];
+      if (cell.owner === owner.id) {
+        this.visibleCellsBuffer.push(cell);
+        continue;
       }
-      return false;
-    });
+      if (cell.x < minX || cell.x > maxX || cell.y < minY || cell.y > maxY) continue;
+      if (isSingle) {
+        this.visibleCellsBuffer.push(cell);
+      } else {
+        for (let j = 0; j < oCells.length; j++) {
+          const mine = oCells[j];
+          if (Math.abs(cell.x - mine.x) <= reach && Math.abs(cell.y - mine.y) <= reach) {
+            this.visibleCellsBuffer.push(cell);
+            break;
+          }
+        }
+      }
+    }
+
+    this.visibleVirusesBuffer.length = 0;
+    for (let i = 0; i < this.viruses.length; i++) {
+      const virus = this.viruses[i];
+      if (virus.x < minX || virus.x > maxX || virus.y < minY || virus.y > maxY) continue;
+      if (isSingle) {
+        this.visibleVirusesBuffer.push(virus);
+      } else {
+        for (let j = 0; j < oCells.length; j++) {
+          const mine = oCells[j];
+          if (Math.abs(virus.x - mine.x) <= reach && Math.abs(virus.y - mine.y) <= reach) {
+            this.visibleVirusesBuffer.push(virus);
+            break;
+          }
+        }
+      }
+    }
+
+    this.visibleEjectedBuffer.length = 0;
     const pelletReach = AI.performance.foodRadius + 80;
-    const visibleEjected = this.ejected.filter(mass => {
-      if (mass.mass <= 0) return false;
-      for (const mine of owner.cells) {
-        if (Math.abs(mass.x - mine.x) <= pelletReach && Math.abs(mass.y - mine.y) <= pelletReach) return true;
+    let pMinX = m0.x - pelletReach;
+    let pMaxX = m0.x + pelletReach;
+    let pMinY = m0.y - pelletReach;
+    let pMaxY = m0.y + pelletReach;
+    if (!isSingle) {
+      for (let i = 1; i < oCells.length; i++) {
+        const c = oCells[i];
+        if (c.x - pelletReach < pMinX) pMinX = c.x - pelletReach;
+        if (c.x + pelletReach > pMaxX) pMaxX = c.x + pelletReach;
+        if (c.y - pelletReach < pMinY) pMinY = c.y - pelletReach;
+        if (c.y + pelletReach > pMaxY) pMaxY = c.y + pelletReach;
       }
-      return false;
-    });
+    }
+
+    for (let i = 0; i < this.ejected.length; i++) {
+      const mass = this.ejected[i];
+      if (mass.mass <= 0) continue;
+      if (mass.x < pMinX || mass.x > pMaxX || mass.y < pMinY || mass.y > pMaxY) continue;
+      if (isSingle) {
+        this.visibleEjectedBuffer.push(mass);
+      } else {
+        for (let j = 0; j < oCells.length; j++) {
+          const mine = oCells[j];
+          if (Math.abs(mass.x - mine.x) <= pelletReach && Math.abs(mass.y - mine.y) <= pelletReach) {
+            this.visibleEjectedBuffer.push(mass);
+            break;
+          }
+        }
+      }
+    }
+
     const decision = think({
       time: this.time,
       world: WORLD,
       mode: this.mode,
       owner,
-      cells: visibleCells,
-      viruses: visibleViruses,
-      ejected: visibleEjected,
+      cells: this.visibleCellsBuffer,
+      viruses: this.visibleVirusesBuffer,
+      ejected: this.visibleEjectedBuffer,
       foodNear: (x, y, radius) => this.index.near(x, y, radius),
       ownerOf: id => this.ownerMap.get(id),
       random: () => this.random(),
@@ -599,6 +968,7 @@ export class AgarEngine {
   }
 
   private moveOwner(owner: Organism, dt: number) {
+    const impulseDecayFactor = Math.exp(-BALANCE.impulseDecay * dt);
     for (const cell of owner.cells) {
       if (!cell.alive) continue;
       cell.lx = cell.x;
@@ -606,7 +976,9 @@ export class AgarEngine {
       const dx = owner.targetX - cell.x;
       const dy = owner.targetY - cell.y;
       const length = Math.hypot(dx, dy);
-      const speed = cellSpeed(cell.mass);
+      let speed = cellSpeed(cell.mass);
+      if (this.mode === 'turbo') speed *= 1.35;
+      if (owner.id === 0 && this.time < this.speedBoostUntil) speed *= 1.35;
       const slow = Math.min(1, length / Math.max(25, cell.radius * 0.65));
       if (length > 1) {
         cell.x += dx / length * speed * slow * dt;
@@ -614,8 +986,8 @@ export class AgarEngine {
       }
       cell.x += cell.vx * dt;
       cell.y += cell.vy * dt;
-      cell.vx *= Math.exp(-BALANCE.impulseDecay * dt);
-      cell.vy *= Math.exp(-BALANCE.impulseDecay * dt);
+      cell.vx *= impulseDecayFactor;
+      cell.vy *= impulseDecayFactor;
       cell.radius += (massRadius(cell.mass) - cell.radius) * Math.min(1, dt * 9);
       cell.pulse = Math.max(0, cell.pulse - dt * 3.2);
       // Effective radius can never exceed half the arena, otherwise clamping
@@ -628,6 +1000,8 @@ export class AgarEngine {
   }
 
   private recombine(owner: Organism, dt: number) {
+    if (owner.cells.length <= 1) return;
+    let deadCount = 0;
     for (let i = 0; i < owner.cells.length; i++) {
       const a = owner.cells[i];
       if (!a.alive) continue;
@@ -646,6 +1020,7 @@ export class AgarEngine {
             a.mass = total;
             a.pulse = 1;
             b.alive = false;
+            deadCount++;
             if (owner.id === 0) {
               arenaSound.play('merge');
               this.addFloater(a.x, a.y - a.radius, 'Hợp nhất!', '#ffffff');
@@ -661,7 +1036,9 @@ export class AgarEngine {
         }
       }
     }
-    owner.cells = owner.cells.filter(cell => cell.alive);
+    if (deadCount > 0) {
+      owner.cells = owner.cells.filter(cell => cell.alive);
+    }
   }
 
   split(): boolean {
@@ -685,9 +1062,11 @@ export class AgarEngine {
       const radius = massRadius(cell.mass);
       const newCell = this.makeCell(owner.id, cell.x + Math.cos(angle) * radius, cell.y + Math.sin(angle) * radius, cell.mass);
       newCell.radius = radius * 0.7;
-      newCell.vx = Math.cos(angle) * BALANCE.splitImpulse;
-      newCell.vy = Math.sin(angle) * BALANCE.splitImpulse;
-      cell.mergeAt = newCell.mergeAt = this.time + mergeDelay(cell.mass);
+      const impulse = this.mode === 'turbo' ? BALANCE.splitImpulse * 1.2 : BALANCE.splitImpulse;
+      newCell.vx = Math.cos(angle) * impulse;
+      newCell.vy = Math.sin(angle) * impulse;
+      const delay = this.mode === 'turbo' ? mergeDelay(cell.mass) * 0.6 : mergeDelay(cell.mass);
+      cell.mergeAt = newCell.mergeAt = this.time + delay;
       owner.cells.push(newCell);
       didSplit = true;
     }
@@ -728,11 +1107,14 @@ export class AgarEngine {
   }
 
   private updateEjected(dt: number) {
-    for (const mass of this.ejected) {
+    if (this.ejected.length === 0) return;
+    const ejectDecayFactor = Math.exp(-BALANCE.ejectDecay * dt);
+    for (let i = 0; i < this.ejected.length; i++) {
+      const mass = this.ejected[i];
       mass.x = clamp(mass.x + mass.vx * dt, 10, WORLD - 10);
       mass.y = clamp(mass.y + mass.vy * dt, 10, WORLD - 10);
-      mass.vx *= Math.exp(-BALANCE.ejectDecay * dt);
-      mass.vy *= Math.exp(-BALANCE.ejectDecay * dt);
+      mass.vx *= ejectDecayFactor;
+      mass.vy *= ejectDecayFactor;
     }
     this.ejected = this.ejected.filter(mass => this.time - mass.born < BALANCE.ejectLifetime && mass.mass > 0);
     // Hard cap so eject spam can never grow memory or collision cost unboundedly.
@@ -743,19 +1125,53 @@ export class AgarEngine {
   }
 
   private consumeFood() {
-    for (const owner of this.owners) {
-      for (const cell of owner.cells) {
-        // Copy the query before moving consumed food to another bucket.
-        const nearby = [...this.index.near(cell.x, cell.y, cell.radius + 7)];
-        for (const food of nearby) {
-          if (distance(cell, food) > cell.radius) continue;
-          cell.mass += food.mass;
-          cell.pulse = Math.min(1, cell.pulse + 0.25);
-          if (owner.id === 0) {
-            this.stats.food++;
-            this.burst(food.x, food.y, food.color, 2);
-            arenaSound.play('eat');
+    for (let o = 0; o < this.owners.length; o++) {
+      const owner = this.owners[o];
+      const oCells = owner.cells;
+      for (let c = 0; c < oCells.length; c++) {
+        const cell = oCells[c];
+        if (!cell.alive) continue;
+        const cellR = cell.radius;
+        const rSq = cellR * cellR;
+        this.eatenFoodScratch.length = 0;
+        this.index.forEachNear(cell.x, cell.y, cellR + 7, (food) => {
+          const dx = cell.x - food.x;
+          const dy = cell.y - food.y;
+          if (dx * dx + dy * dy <= rSq) {
+            this.eatenFoodScratch.push(food);
+          }
+        });
+
+        for (let i = 0; i < this.eatenFoodScratch.length; i++) {
+          const food = this.eatenFoodScratch[i];
+          if (food.kind === 'gold') {
+            cell.mass += 25;
+            cell.pulse = 1;
+            if (owner.id === 0) {
+              this.stats.food += 5;
+              this.burst(food.x, food.y, '#ffd700', 8);
+              this.addFloater(food.x, food.y - food.radius, '+25 VÀNG!', '#ffd700');
+              arenaSound.play('powerup');
+            }
+          } else if (food.kind === 'speed') {
+            cell.mass += 12;
+            cell.pulse = 1;
+            if (owner.id === 0) {
+              this.speedBoostUntil = this.time + 4;
+              this.burst(food.x, food.y, '#00f2fe', 8);
+              this.addFloater(food.x, food.y - food.radius, 'TĂNG TỐC!', '#00f2fe');
+              arenaSound.play('powerup');
+            }
           } else {
+            cell.mass += food.mass;
+            cell.pulse = Math.min(1, cell.pulse + 0.25);
+            if (owner.id === 0) {
+              this.stats.food++;
+              this.burst(food.x, food.y, food.color, 2);
+              arenaSound.play('eat');
+            }
+          }
+          if (owner.id !== 0) {
             this.aiTotals.foodEaten++;
             const brain = this.brains.get(owner.id);
             if (brain) {
@@ -765,12 +1181,20 @@ export class AgarEngine {
           }
           this.resetFood(food);
         }
-        for (const mass of this.ejected) {
-          if (mass.mass <= 0 || this.time - mass.born < BALANCE.ejectPickupDelay || cell.mass < mass.mass * BALANCE.ejectEatRatio) continue;
-          if (distance(cell, mass) < cell.radius - 3) {
-            cell.mass += mass.mass;
-            cell.pulse = 1;
-            mass.mass = 0;
+
+        if (this.ejected.length > 0) {
+          const eatR = cellR - 3;
+          const eatRSq = eatR * eatR;
+          for (let i = 0; i < this.ejected.length; i++) {
+            const mass = this.ejected[i];
+            if (mass.mass <= 0 || this.time - mass.born < BALANCE.ejectPickupDelay || cell.mass < mass.mass * BALANCE.ejectEatRatio) continue;
+            const dx = cell.x - mass.x;
+            const dy = cell.y - mass.y;
+            if (dx * dx + dy * dy < eatRSq) {
+              cell.mass += mass.mass;
+              cell.pulse = 1;
+              mass.mass = 0;
+            }
           }
         }
       }
@@ -778,23 +1202,32 @@ export class AgarEngine {
   }
 
   private consumeCells() {
-    // Deterministic resolution: biggest cells eat first, each victim only once.
-    const cells = this.owners.flatMap(owner => owner.cells).sort((a, b) => b.mass - a.mass || a.id - b.id);
+    this.cellBuffer.length = 0;
+    for (let o = 0; o < this.owners.length; o++) {
+      const oCells = this.owners[o].cells;
+      for (let c = 0; c < oCells.length; c++) {
+        if (oCells[c].alive) this.cellBuffer.push(oCells[c]);
+      }
+    }
+    this.cellBuffer.sort((a, b) => b.mass - a.mass || a.id - b.id);
+    const cells = this.cellBuffer;
     for (let i = 0; i < cells.length; i++) {
       const big = cells[i];
       if (!big.alive) continue;
+      const bigR = big.radius;
       for (let j = i + 1; j < cells.length; j++) {
         const small = cells[j];
         if (!small.alive || big.owner === small.owner || big.mass < small.mass * BALANCE.eatRatio) continue;
-        // Broad-phase: eating requires deep overlap, so pairs farther apart
-        // than the predator's radius on either axis can never interact.
-        if (Math.abs(small.x - big.x) > big.radius || Math.abs(small.y - big.y) > big.radius) continue;
+        const dx = small.x - big.x;
+        const dy = small.y - big.y;
+        if (Math.abs(dx) > bigR || Math.abs(dy) > bigR) continue;
         const bigOwner = this.ownerById(big.owner);
         const smallOwner = this.ownerById(small.owner);
         if (!bigOwner || !smallOwner) continue;
         if (this.mode === 'teams' && bigOwner.team === smallOwner.team) continue;
         if (smallOwner.protectedUntil > this.time || bigOwner.protectedUntil > this.time) continue;
-        if (distance(big, small) > big.radius - small.radius * BALANCE.eatOverlapFactor) continue;
+        const maxDist = bigR - small.radius * BALANCE.eatOverlapFactor;
+        if (maxDist <= 0 || dx * dx + dy * dy > maxDist * maxDist) continue;
         big.mass += small.mass;
         big.pulse = 1;
         small.alive = false;
@@ -803,8 +1236,29 @@ export class AgarEngine {
           if (this.player.cells.length > 1) this.stats.splitEats++;
           arenaSound.play('pop');
           this.addFloater(small.x, small.y, `+${Math.round(small.mass)}`, '#ffffff');
+
+          if (this.time - this.lastKillTime < 4.5) {
+            this.killStreak++;
+            if (this.killStreak === 2) {
+              this.addNotice('🔥 DOUBLE KILL!', true);
+              arenaSound.play('combo');
+            } else if (this.killStreak === 3) {
+              this.addNotice('⚡ TRIPLE KILL!', true);
+              arenaSound.play('combo');
+            } else if (this.killStreak >= 4) {
+              this.addNotice(`👑 MEGA KILL x${this.killStreak}!`, true);
+              arenaSound.play('combo');
+            }
+          } else {
+            this.killStreak = 1;
+            this.addNotice(`Bạn đã nuốt chửng ${smallOwner.name} (+${Math.round(small.mass)})`);
+          }
+          this.lastKillTime = this.time;
         }
-        if (small.owner === 0) this.stats.eatenBy = bigOwner.name;
+        if (small.owner === 0) {
+          this.stats.eatenBy = bigOwner.name;
+          this.addNotice(`${bigOwner.name} đã nuốt chửng bạn!`, true);
+        }
         if (big.owner !== 0) {
           this.aiTotals.preyEaten++;
           const brain = this.brains.get(big.owner);
@@ -881,30 +1335,77 @@ export class AgarEngine {
 
   private explode(owner: Organism, cell: Cell, bonus: number) {
     if (owner.id !== 0) recordVirusPop(this.brains.get(owner.id), this.aiTotals, this.time);
+
+    // Authentic Agar.io mechanic: Cell always gains the virus bonus mass first
     cell.mass += bonus;
-    const capacity = BALANCE.maxFragments + 1 - owner.cells.length;
-    if (capacity < 2) {
-      // At the fragment cap the virus still punishes: burn mass instead of bursting.
-      cell.mass = Math.max(BALANCE.minSplitMass, cell.mass * 0.85);
-      cell.mergeAt = this.time + BALANCE.virusMergeDelay;
-      if (owner.id === 0) arenaSound.play('virus');
+    const currentTotalMass = cell.mass;
+
+    // Maximum fragments in Agar.io is 16
+    const availableSlots = BALANCE.maxFragments - owner.cells.length;
+
+    // Authentic Agar.io "16-Cell Virus Eat" (Virus Farming):
+    // When a player already has 16 cells, hitting a virus does NOT punish or burn mass!
+    // Instead, the cell absorbs the virus mass safely without splitting further.
+    if (availableSlots <= 0) {
+      cell.pulse = 1.25;
+      if (owner.id === 0) {
+        arenaSound.play('virus');
+        this.addFloater(cell.x, cell.y - cell.radius, `+${Math.round(bonus)} Ăn Virus!`, '#22c55e');
+      }
+      this.burst(cell.x, cell.y, '#4ade80', 16);
       return;
     }
-    const count = Math.min(capacity, Math.max(2, Math.floor(cell.mass / BALANCE.virusMinBurstMass)));
-    const mass = cell.mass / count;
-    cell.mass = mass;
-    cell.mergeAt = this.time + BALANCE.virusMergeDelay;
-    for (let i = 1; i < count; i++) {
-      const angle = i / (count - 1) * Math.PI * 2;
-      const piece = this.makeCell(owner.id, cell.x + Math.cos(angle) * 15, cell.y + Math.sin(angle) * 15, mass);
-      piece.vx = Math.cos(angle) * (280 + this.random() * 220);
-      piece.vy = Math.sin(angle) * (280 + this.random() * 220);
-      piece.mergeAt = this.time + BALANCE.virusMergeDelay;
+
+    // Determine how many fragments to create based on mass and available player slots
+    const maxPiecesFromMass = Math.floor(currentTotalMass / BALANCE.virusMinBurstMass);
+    const piecesToSpawn = Math.min(availableSlots, Math.max(1, maxPiecesFromMass - 1));
+    const totalPieces = piecesToSpawn + 1;
+
+    // Absolute mass conservation: divide total mass evenly among all pieces
+    const pieceMass = currentTotalMass / totalPieces;
+    cell.mass = pieceMass;
+    cell.radius = massRadius(pieceMass);
+    cell.pulse = 1.35;
+    cell.mergeAt = this.time + mergeDelay(pieceMass);
+
+    // Realistic radial starburst dispersion with angular jitter & parent recoil
+    const baseAngle = this.random() * Math.PI * 2;
+    const parentVx = cell.vx;
+    const parentVy = cell.vy;
+
+    // Parent cell recoil from explosive burst
+    cell.vx = parentVx * 0.2 - Math.cos(baseAngle) * 120;
+    cell.vy = parentVy * 0.2 - Math.sin(baseAngle) * 120;
+
+    for (let i = 0; i < piecesToSpawn; i++) {
+      const angleFraction = i / piecesToSpawn;
+      const jitter = (this.random() - 0.5) * 0.32;
+      const angle = baseAngle + angleFraction * Math.PI * 2 + jitter;
+
+      const spawnDist = Math.max(10, cell.radius * 0.45);
+      const spawnX = clamp(cell.x + Math.cos(angle) * spawnDist, 20, WORLD - 20);
+      const spawnY = clamp(cell.y + Math.sin(angle) * spawnDist, 20, WORLD - 20);
+
+      const piece = this.makeCell(owner.id, spawnX, spawnY, pieceMass);
+      piece.radius = massRadius(pieceMass) * 0.65;
+      piece.pulse = 1.15;
+
+      // Authentic split impulse with momentum inheritance (750 - 990 px/s)
+      const burstImpulse = (BALANCE.splitImpulse * 0.95) + (this.random() * 240);
+      piece.vx = Math.cos(angle) * burstImpulse + parentVx * 0.35;
+      piece.vy = Math.sin(angle) * burstImpulse + parentVy * 0.35;
+
+      // Dynamic remerge delay based on individual piece mass
+      piece.mergeAt = this.time + mergeDelay(pieceMass);
       owner.cells.push(piece);
     }
+
+    // Authentic viral debris and pulse animations
+    this.burst(cell.x, cell.y, '#7ee787', 22);
+    this.burst(cell.x, cell.y, owner.color, 12);
     if (owner.id === 0) {
       arenaSound.play('virus');
-      this.addFloater(cell.x, cell.y - cell.radius, 'Virus!', '#9bcf78');
+      this.addFloater(cell.x, cell.y - cell.radius, 'Virus Nổ Tung!', '#9bcf78');
     }
   }
 
@@ -1035,6 +1536,22 @@ export class AgarEngine {
       rank: leaders.findIndex(leader => leader.player) + 1, population: leaders.length, leaders: leaders.slice(0, 10), stats: { ...this.stats },
       teamShares: teamMass.map(mass => mass / total), spectating: this.ownerById(this.spectateId)?.name || '',
       mergeIn: this.player.cells.length > 1 ? Math.max(0, Math.ceil(Math.max(...this.player.cells.map(cell => cell.mergeAt)) - this.time)) : 0,
+      royaleRadius: this.mode === 'royale' ? this.royaleRadius : undefined,
+      royaleCenter: this.mode === 'royale' ? { x: WORLD / 2, y: WORLD / 2 } : undefined,
+      speedBoostRemaining: Math.max(0, this.speedBoostUntil - this.time),
+      combatNotices: [...this.combatNotices],
+      streak: this.killStreak,
+      royaleWinner: this.royaleWinner,
+      boss: this.mode === 'boss' ? {
+        name: 'KRAKEN TITAN',
+        mass: Math.round(this.ownerById(999)?.cells[0]?.mass ?? 0),
+        maxMass: BALANCE.bossMaxMass,
+        x: this.ownerById(999)?.cells[0]?.x ?? WORLD / 2,
+        y: this.ownerById(999)?.cells[0]?.y ?? WORLD / 2,
+        alive: (this.ownerById(999)?.cells[0]?.mass ?? 0) > 0,
+      } : undefined,
+      meteorAlert: this.meteorAlert ? { ...this.meteorAlert } : undefined,
+      activeEmotes: this.activeEmotes.slice(),
     };
   }
 }

@@ -1,6 +1,8 @@
 export type SoundKind =
   | 'eat' | 'split' | 'eject' | 'pop' | 'start' | 'end'
-  | 'merge' | 'virus' | 'rank' | 'click' | 'achievement' | 'denied';
+  | 'merge' | 'virus' | 'rank' | 'click' | 'achievement' | 'denied'
+  | 'powerup' | 'royale_alarm' | 'combo' | 'whoosh'
+  | 'titan_roar' | 'emote' | 'meteor';
 
 interface SoundPreset {
   from: number;
@@ -24,6 +26,13 @@ const PRESETS: Record<SoundKind, SoundPreset> = {
   click: { from: 700, to: 900, length: 0.05, gain: 0.03, type: 'sine' },
   achievement: { from: 660, to: 1320, length: 0.28, gain: 0.06, type: 'triangle' },
   denied: { from: 220, to: 160, length: 0.09, gain: 0.04, type: 'square' },
+  powerup: { from: 520, to: 1280, length: 0.22, gain: 0.065, type: 'triangle' },
+  royale_alarm: { from: 180, to: 90, length: 0.45, gain: 0.075, type: 'sawtooth', throttleMs: 800 },
+  combo: { from: 440, to: 1100, length: 0.35, gain: 0.07, type: 'sine' },
+  whoosh: { from: 320, to: 160, length: 0.14, gain: 0.06, type: 'triangle' },
+  titan_roar: { from: 110, to: 45, length: 0.65, gain: 0.08, type: 'sawtooth', throttleMs: 1200 },
+  emote: { from: 780, to: 1150, length: 0.08, gain: 0.045, type: 'sine', throttleMs: 150 },
+  meteor: { from: 180, to: 55, length: 0.55, gain: 0.075, type: 'square', throttleMs: 1500 },
 };
 
 class ArenaSound {

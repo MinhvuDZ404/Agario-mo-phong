@@ -1657,6 +1657,8 @@ function pointDanger(
   return danger;
 }
 
+const THREATS_SEEN_SET = new Set<number>();
+
 function collectThreats(
   owner: Organism,
   self: SelfView,
@@ -1668,7 +1670,7 @@ function collectThreats(
   fleeMul: number,
 ): ThreatInfo[] {
   const found: ThreatInfo[] = [];
-  const seen = new Set<number>();
+  THREATS_SEEN_SET.clear();
   const broad = perception + 280;
   for (const other of cells) {
     if (!other.alive || other.owner === owner.id) continue;
@@ -1694,8 +1696,8 @@ function collectThreats(
         bestCell = mine;
       }
     }
-    if (!best || seen.has(other.id)) continue;
-    seen.add(other.id);
+    if (!best || THREATS_SEEN_SET.has(other.id)) continue;
+    THREATS_SEEN_SET.add(other.id);
     const protectionFade = otherOwner.protectedUntil > time ? 0.65 : 1;
     found.push({
       id: other.id,
@@ -1749,8 +1751,13 @@ function selectPrey(
     let threatDanger = 0;
     for (const threat of threats) {
       if (threat.ownerId === other.owner) continue;
-      if (hypot(threat.x - other.x, threat.y - other.y) < 420 && threat.mass > other.mass * BALANCE.eatRatio * 0.95) {
-        threatDanger += threat.score * 0.85;
+      const tdx = Math.abs(threat.x - other.x);
+      const tdy = Math.abs(threat.y - other.y);
+      if (tdx < 420 && tdy < 420 && threat.mass > other.mass * BALANCE.eatRatio * 0.95) {
+        const tDist = Math.hypot(tdx, tdy);
+        if (tDist < 420) {
+          threatDanger += threat.score * 0.85;
+        }
       }
     }
     // A rival fighting the prey is an opportunity, but also a third-party risk.
@@ -1765,9 +1772,13 @@ function selectPrey(
         const competitorOwner = ownerOf(competitor.owner);
         if (competitorOwner?.team === owner.team) continue;
       }
-      const competitorDistance = hypot(competitor.x - other.x, competitor.y - other.y);
-      if (competitorDistance > 430 || competitor.mass < other.mass * BALANCE.eatRatio) continue;
-      competitorRisk += clamp((1 - competitorDistance / 430) * (competitor.mass / Math.max(1, self.largestMass)), 0, 1.25);
+      const cdx = Math.abs(competitor.x - other.x);
+      const cdy = Math.abs(competitor.y - other.y);
+      if (cdx > 430 || cdy > 430 || competitor.mass < other.mass * BALANCE.eatRatio) continue;
+      const competitorDistance = Math.hypot(cdx, cdy);
+      if (competitorDistance <= 430) {
+        competitorRisk += clamp((1 - competitorDistance / 430) * (competitor.mass / Math.max(1, self.largestMass)), 0, 1.25);
+      }
     }
     const scored = scorePrey({
       selfX: self.x, selfY: self.y, selfMass: self.largestMass, selfRadius: self.radius, selfSpeed: self.speed,
@@ -1830,6 +1841,27 @@ function selectPrey(
   return best;
 }
 
+interface FoodCluster {
+  x: number;
+  y: number;
+  mass: number;
+  count: number;
+}
+const CLUSTERS_MAP = new Map<number, FoodCluster>();
+const CLUSTERS_POOL: FoodCluster[] = [];
+let clusterPoolIdx = 0;
+function getCluster(): FoodCluster {
+  if (clusterPoolIdx < CLUSTERS_POOL.length) {
+    const c = CLUSTERS_POOL[clusterPoolIdx++];
+    c.x = 0; c.y = 0; c.mass = 0; c.count = 0;
+    return c;
+  }
+  const c = { x: 0, y: 0, mass: 0, count: 0 };
+  CLUSTERS_POOL.push(c);
+  clusterPoolIdx++;
+  return c;
+}
+
 function bestFood(
   self: SelfView,
   foodNear: (x: number, y: number, radius: number) => Iterable<Food>,
@@ -1843,19 +1875,23 @@ function bestFood(
 ): { x: number; y: number; score: number; count: number } | null {
   const radius = AI.performance.foodRadius;
   const bucket = AI.farm.bucket;
-  const clusters = new Map<number, { x: number; y: number; mass: number; count: number }>();
+  CLUSTERS_MAP.clear();
+  clusterPoolIdx = 0;
   let seen = 0;
   for (const food of foodNear(self.x, self.y, radius)) {
     const dx = food.x - self.x;
     const dy = food.y - self.y;
     if (dx * dx + dy * dy > radius * radius) continue;
     const key = Math.floor(food.x / bucket) + Math.floor(food.y / bucket) * 64;
-    const cluster = clusters.get(key) ?? { x: 0, y: 0, mass: 0, count: 0 };
+    let cluster = CLUSTERS_MAP.get(key);
+    if (!cluster) {
+      cluster = getCluster();
+      CLUSTERS_MAP.set(key, cluster);
+    }
     cluster.x += food.x;
     cluster.y += food.y;
     cluster.mass += food.mass;
     cluster.count++;
-    clusters.set(key, cluster);
     if (++seen > AI.performance.maxFood * 2) break;
   }
   for (const mass of ejected) {
@@ -1865,11 +1901,19 @@ function bestFood(
     const dy = mass.y - self.y;
     if (dx * dx + dy * dy > radius * radius) continue;
     const key = Math.floor(mass.x / bucket) + Math.floor(mass.y / bucket) * 64 + 4096;
-    clusters.set(key, { x: mass.x, y: mass.y, mass: mass.mass * 1.4, count: 1 });
+    let cEject = CLUSTERS_MAP.get(key);
+    if (!cEject) {
+      cEject = getCluster();
+      CLUSTERS_MAP.set(key, cEject);
+    }
+    cEject.x = mass.x;
+    cEject.y = mass.y;
+    cEject.mass = mass.mass * 1.4;
+    cEject.count = 1;
   }
   let best: { x: number; y: number; score: number; count: number } | null = null;
   const speed = hypot(self.vx, self.vy);
-  for (const cluster of clusters.values()) {
+  for (const cluster of CLUSTERS_MAP.values()) {
     const cx = cluster.x / cluster.count;
     const cy = cluster.y / cluster.count;
     const dist = hypot(cx - self.x, cy - self.y);
@@ -1921,15 +1965,19 @@ function separation(self: SelfView, cells: Cell[], ownerId: number): {
   let sy = 0;
   let crowd = 0;
   const points: Array<Pick<Cell, 'x' | 'y' | 'mass' | 'radius'>> = [];
-  for (const cell of cells) {
+  for (let i = 0; i < cells.length; i++) {
+    const cell = cells[i];
     if (cell.owner === ownerId) continue;
     const dx = self.x - cell.x;
     const dy = self.y - cell.y;
-    const dist = hypot(dx, dy);
-    if (dist < 320) crowd++;
-    if (dist < 620 && points.length < 24) points.push(cell);
+    if (Math.abs(dx) > 620 || Math.abs(dy) > 620) continue;
+    const distSq = dx * dx + dy * dy;
+    if (distSq < 320 * 320) crowd++;
+    if (distSq < 620 * 620 && points.length < 24) points.push(cell);
     const ratio = cell.mass / Math.max(1, self.largestMass);
-    if (dist > 1 && dist < self.radius + cell.radius + 36 && ratio > 0.75 && ratio < 1.35) {
+    const maxR = self.radius + cell.radius + 36;
+    if (distSq > 1 && distSq < maxR * maxR && ratio > 0.75 && ratio < 1.35) {
+      const dist = Math.sqrt(distSq);
       sx += dx / dist * 28;
       sy += dy / dist * 28;
     }
